@@ -210,6 +210,45 @@ async def run_bot() -> None:
             )
             return
 
+        # ── !debug ─────────────────────────────────────────────────────
+        # Dump full embed structure of a referenced message for debugging
+        if content.lower() == "!debug":
+            ref = message.reference
+            if not ref:
+                await message.channel.send("Reply to a spawn message with `!debug`.", mention_author=False)
+                return
+            try:
+                target = (
+                    ref.resolved
+                    if isinstance(ref.resolved, discord.Message)
+                    else await message.channel.fetch_message(ref.message_id)
+                )
+            except Exception as exc:
+                await message.channel.send(f"Couldn't fetch message: {exc}", mention_author=False)
+                return
+
+            lines = [f"**Embeds: {len(target.embeds)}**"]
+            for i, emb in enumerate(target.embeds):
+                lines.append(f"\n__Embed {i}__")
+                lines.append(f"title: `{emb.title}`")
+                lines.append(f"description: `{emb.description}`")
+                lines.append(f"url: `{emb.url}`")
+                lines.append(f"image.url: `{emb.image.url if emb.image else None}`")
+                lines.append(f"thumbnail.url: `{emb.thumbnail.url if emb.thumbnail else None}`")
+                lines.append(f"author.icon_url: `{emb.author.icon_url if emb.author else None}`")
+                lines.append(f"author.name: `{emb.author.name if emb.author else None}`")
+                for j, f_ in enumerate(emb.fields):
+                    lines.append(f"field[{j}]: name=`{f_.name}` value=`{f_.value}`")
+            lines.append(f"\n**Attachments: {len(target.attachments)}**")
+            for att in target.attachments:
+                lines.append(f"  {att.filename}: {att.url}")
+            out = "\n".join(lines)
+            log.info("DEBUG EMBED:\n%s", out)
+            # Send in chunks if needed
+            for chunk_start in range(0, len(out), 1900):
+                await message.channel.send(f"```\n{out[chunk_start:chunk_start+1900]}\n```", mention_author=False)
+            return
+
         # ── !guess ─────────────────────────────────────────────────────
         if content.lower() == "!guess":
             ref = message.reference
