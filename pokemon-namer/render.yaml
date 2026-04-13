@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: pokemon-namer
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: WATCH_CHANNEL_IDS
+        sync: false
+      - key: MIN_CONFIDENCE
+        value: "50"
+      - key: DELAY_MIN
+        value: "2.0"
+      - key: DELAY_MAX
+        value: "4.5"
+      - key: COOLDOWN
+        value: "3.0"

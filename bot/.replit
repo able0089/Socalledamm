@@ -26,7 +26,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 pokemon-namer/bot.py"
+args = "cd pokemon-namer && PORT=8000 python3 bot.py"
 waitForPort = 8000
 
 [workflows.workflow.metadata]
@@ -41,6 +41,10 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
@@ -48,6 +52,6 @@ externalPort = 8080
 localPort = 8081
 externalPort = 80
 
-[nix]
-channel = "stable-25_05"
-packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
+[[ports]]
+localPort = 10000
+externalPort = 3000
