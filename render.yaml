@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: pokemon-namer-bot
+    runtime: python
+    rootDir: pokemon-namer
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: WATCH_CHANNEL_IDS
+        value: ""
+      - key: DELAY_MIN
+        value: "2.0"
+      - key: DELAY_MAX
+        value: "4.5"
+      - key: COOLDOWN
+        value: "3.0"
+    healthCheckPath: /healthz
+    autoDeploy: true

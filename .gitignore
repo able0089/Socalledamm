@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Pokemon bot — model auto-downloaded at startup
+pokemon-namer/model/
