@@ -1,0 +1,102 @@
+Please write a prompt for this, 
+
+Quality of life changes : 
+
+The bot is naming pokemons, iam very happy, can it be a little bit faster like the pokemon spawns and like it names it after 5s or more like not so fast so that discord flags it but like a bit faster than usual is it okay? 
+
+And also I want to know what will happen if pokemon will spawn together in different channels two or more will it crash ? or name them together ? 
+
+New features adding : 
+
+So like since it is only for one server I think I can make it work, 
+
+1. Collection pings : users can use pk!cl add <pokemon> to add it to their collections so that whenever that specific pokemon spawn the bot should, for example 
+pk!cl add charizard, pikachu 
+
+And when pikachu spawns or charizard 
+
+That's Charizard 
+Collection pings: @user, @user2 blah blah 
+
+2. Shiny hunting : same as collection pings 
+pk!sh <pokemon> 
+But a person can only hunt one pokemon and if they use that  again their before pokemon hunt will be erased and new hunt will be registered 
+
+That's Charizard 
+Shiny hunt pings: @user, @user2 etc 
+
+3. Rare ping : 
+When a rare pokemon spawns the bot should ping a specific role, (role will be added by the users with administrator permissions )
+
+e.g That's Arceus 
+Rare:  @role 
+
+
+Role can be set by using 
+pk!settings rare-role @role
+
+Same for regional pokemons 
+
+pk!settings regional-role @role
+
+That's Galarian Farfetch'd 
+Regional: @role 
+
+If the bot is not able to differentiate between roles I can add like 
+
+pk!rares arceus, eternatus, mew, Mewtwo.... etc like yk so that bot will react to that 
+
+And pk!regionals .....
+
+If it's too heavy for Render hosted bot I can scrap this plan, also 
+If coll ping Shiny hunt ping and rare or regional ping gets clashed 
+
+Use in this way 
+
+That's arceus 
+Rare: role 
+Shiny hunt pings: 
+Collection pings: 
+
+The role prio order (: 
+
+
+And I also changed the bot I'd so you won't be able to view it 
+
+1396815034247806999 bot owner ID 
+
+I want few commands for owner only like 
+
+pk!admin view cl @user/userid 
+
+to view their collection or sh to view their hunt and many more interesting owner commands pls hehe 
+
+Also !debug for owner only and and and 
+
+Prefix is pk! or mention bot 
+
+I hope the bot will be able to detect user ids 
+
+Lastly 
+
+
+pk!channelsettings rareping-role true/false 
+
+regional-ping true/false 
+
+shinyhunt-ping true/false 
+
+collection-ping true/false 
+
+naming true/false 
+
+to toggle everything in specific channel 
+
+and if we use only 
+
+pk!channelsettings 
+
+It should load an embed with all the details, like if shinyhunt pings coll pings are on or off, its on usually but can turn it off 
+
+Thank you
+
