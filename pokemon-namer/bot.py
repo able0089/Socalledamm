@@ -28,26 +28,25 @@ if not TOKEN:
     log.error("FATAL: DISCORD_TOKEN not set!")
     sys.exit(1)
 
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_MODEL = os.environ.get("HF_MODEL", "imjeffhi/pokemon_classifier")
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "30"))
+
 POKETWO_BOT_ID = 716390085896962058
 
 _raw = os.environ.get("WATCH_CHANNEL_IDS", "")
 WATCH_CHANNEL_IDS = {int(x.strip()) for x in _raw.split(",") if x.strip()}
 
-# Min/max random delay in seconds before responding (anti-detection)
 DELAY_MIN = float(os.environ.get("DELAY_MIN", "2.0"))
 DELAY_MAX = float(os.environ.get("DELAY_MAX", "4.5"))
-
-# Cooldown between actions in the same channel (seconds)
 COOLDOWN = float(os.environ.get("COOLDOWN", "3.0"))
 
 # ── POKEDEX ────────────────────────────────────────────────────────────
-# Local dex number → Pokemon name map (built from PokeAPI)
-# Falls back to fetching from PokeAPI at startup if pokedex.json is missing.
 
 POKEDEX: dict[str, str] = {}
-
 POKEDEX_PATH = Path(__file__).parent / "pokedex.json"
 POKEAPI_URL = "https://pokeapi.co/api/v2/pokemon?limit=2000"
+
 
 async def load_pokedex(session: aiohttp.ClientSession) -> None:
     global POKEDEX
@@ -79,19 +78,21 @@ def lookup_pokemon_name(dex_id: str) -> str | None:
 
 
 # ── IDENTIFICATION ─────────────────────────────────────────────────────
-# Primary:  Parse the dex number from Poketwo's CDN image URL.
-#           cdn.poketwo.net/images/25.png  →  dex 25  →  Pikachu
-# Fallback: PokeAPI image search by URL path segment.
+# Method 1: Parse dex number from Poketwo CDN URL (fast, works if URL contains dex id)
+# Method 2: Hugging Face image classification (works for Discord CDN URLs)
 
-# Matches URLs like:
-#   https://cdn.poketwo.net/images/25.png
-#   https://assets.poketwo.net/images/25.png
-#   https://cdn.poketwo.net/images/25.gif
 CDN_PATTERN = re.compile(r"poketwo\.net/images/(\d+)\.", re.IGNORECASE)
+
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+
+def normalize_hf_label(label: str) -> str:
+    """Convert HF model label like 'mr-mime' or 'pikachu' to 'Mr Mime' / 'Pikachu'."""
+    return label.replace("-", " ").replace("_", " ").title()
 
 
 def identify_from_url(image_url: str) -> tuple[str | None, str]:
-    """Try to identify a Pokemon directly from the image URL."""
+    """Try to identify a Pokemon directly from the Poketwo CDN URL (fast path)."""
     m = CDN_PATTERN.search(image_url)
     if m:
         dex_id = m.group(1)
@@ -99,6 +100,82 @@ def identify_from_url(image_url: str) -> tuple[str | None, str]:
         if name:
             return name, f"dex #{dex_id}"
     return None, ""
+
+
+async def identify_from_image(session: aiohttp.ClientSession, image_url: str) -> tuple[str | None, str]:
+    """Download the image and classify it via Hugging Face Inference API."""
+    # Download image bytes
+    try:
+        async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status != 200:
+                log.warning("Failed to download image (HTTP %d): %s", r.status, image_url)
+                return None, ""
+            image_bytes = await r.read()
+    except Exception as exc:
+        log.error("Error downloading image: %s", exc)
+        return None, ""
+
+    # Build HF API request
+    headers: dict[str, str] = {"Content-Type": "application/octet-stream"}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    try:
+        async with session.post(
+            HF_API_URL,
+            data=image_bytes,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as r:
+            if r.status == 503:
+                # Model is loading — wait and retry once
+                log.info("HF model loading (503), waiting 10s and retrying…")
+                await asyncio.sleep(10)
+                async with session.post(
+                    HF_API_URL,
+                    data=image_bytes,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as r2:
+                    if r2.status != 200:
+                        log.warning("HF API error after retry: HTTP %d", r2.status)
+                        return None, ""
+                    results = await r2.json()
+            elif r.status != 200:
+                body = await r.text()
+                log.warning("HF API error HTTP %d: %s", r.status, body[:200])
+                return None, ""
+            else:
+                results = await r.json()
+    except Exception as exc:
+        log.error("HF API request failed: %s", exc)
+        return None, ""
+
+    # results is a list like [{"label": "pikachu", "score": 0.97}, ...]
+    if not isinstance(results, list) or not results:
+        log.warning("Unexpected HF API response: %s", results)
+        return None, ""
+
+    top = results[0]
+    label = top.get("label", "")
+    score = float(top.get("score", 0)) * 100
+
+    log.info("HF top result: %s (%.1f%%)", label, score)
+
+    if score < MIN_CONFIDENCE:
+        log.warning("Confidence too low (%.1f%% < %.1f%%): %s", score, MIN_CONFIDENCE, label)
+        return None, ""
+
+    name = normalize_hf_label(label)
+    return name, f"AI {score:.0f}%"
+
+
+async def identify(session: aiohttp.ClientSession, image_url: str) -> tuple[str | None, str]:
+    """Try URL-based identification first, fall back to AI classification."""
+    name, method = identify_from_url(image_url)
+    if name:
+        return name, method
+    return await identify_from_image(session, image_url)
 
 
 # ── SPAWN DETECTION ────────────────────────────────────────────────────
@@ -109,6 +186,9 @@ def get_spawn_image_url(message: discord.Message) -> str | None:
             return embed.image.url
         if embed.thumbnail and embed.thumbnail.url:
             return embed.thumbnail.url
+    for att in message.attachments:
+        if att.content_type and att.content_type.startswith("image/"):
+            return att.url
     return None
 
 
@@ -147,8 +227,9 @@ async def run_bot() -> None:
 
     @client.event
     async def on_ready() -> None:
-        log.info("Logged in as %s (ID: %s)", client.user, client.user.id if client.user else "?")  # type: ignore[union-attr]
+        log.info("Logged in as %s (ID: %s)", client.user, client.user.id if client.user else "?")
         log.info("Pokedex ready: %d Pokemon", len(POKEDEX))
+        log.info("HF model: %s (min confidence: %.0f%%)", HF_MODEL, MIN_CONFIDENCE)
         if WATCH_CHANNEL_IDS:
             log.info("Watching channels: %s", WATCH_CHANNEL_IDS)
         else:
@@ -170,7 +251,6 @@ async def run_bot() -> None:
             return
 
         # ── !correct <name> ────────────────────────────────────────────
-        # User tells us the correct name when the bot was wrong
         if content.lower().startswith("!correct "):
             correct_name = content[9:].strip()
             log.info("USER CORRECTION: correct name is '%s'", correct_name)
@@ -182,14 +262,12 @@ async def run_bot() -> None:
             return
 
         # ── !guess ─────────────────────────────────────────────────────
-        # Manual trigger: reply to a spawn message with !guess
         if content.lower() == "!guess":
             ref = message.reference
             if not ref:
                 await message.channel.send("Reply to a Poketwo spawn message with `!guess`.", mention_author=False)
                 return
 
-            # Fetch the message being replied to
             try:
                 target = ref.resolved if isinstance(ref.resolved, discord.Message) else await message.channel.fetch_message(ref.message_id)
             except Exception as exc:
@@ -198,28 +276,27 @@ async def run_bot() -> None:
                 return
 
             image_url = get_spawn_image_url(target)
+            if not image_url and target.attachments:
+                image_url = target.attachments[0].url
             if not image_url:
-                # Try to get any image from the message
-                if target.attachments:
-                    image_url = target.attachments[0].url
-                else:
-                    await message.channel.send("No image found in that message.", mention_author=False)
-                    return
+                await message.channel.send("No image found in that message.", mention_author=False)
+                return
 
             log.info("!guess triggered — image URL: %s", image_url)
-            name, method = identify_from_url(image_url)
+            assert http_session is not None
+            name, method = await identify(http_session, image_url)
 
             if name:
                 log.info("RESULT: %s (via %s)", name, method)
                 await message.channel.send(
-                    f"That's **{name}**!",
+                    f"That's **{name}**! *(identified via {method})*",
                     reference=message,
                     mention_author=False,
                 )
             else:
-                log.warning("Could not identify Pokemon from URL: %s", image_url)
+                log.warning("Could not identify Pokemon from: %s", image_url)
                 await message.channel.send(
-                    f"Sorry, I couldn't identify that Pokemon from this image URL.\n`{image_url}`",
+                    "Sorry, I couldn't identify that Pokemon. Try `!correct <name>` to teach me.",
                     reference=message,
                     mention_author=False,
                 )
@@ -239,10 +316,11 @@ async def run_bot() -> None:
                 log.warning("Spawn message had no image URL")
                 return
 
-            name, method = identify_from_url(image_url)
+            assert http_session is not None
+            name, method = await identify(http_session, image_url)
 
             if not name:
-                log.warning("Could not identify Pokemon from URL: %s", image_url)
+                log.warning("Could not identify Pokemon — image: %s", image_url)
                 return
 
             log.info("Auto-identified: %s (via %s) — image: %s", name, method, image_url)
@@ -267,7 +345,7 @@ async def run_bot() -> None:
     await client.start(TOKEN)
 
 
-# ── WEB SERVER (keeps Render dyno alive) ───────────────────────────────
+# ── WEB SERVER ─────────────────────────────────────────────────────────
 
 async def start_web() -> None:
     port = int(os.environ.get("PORT", 8000))
@@ -297,7 +375,6 @@ async def main() -> None:
     await start_web()
     await load_pokedex(http_session)
 
-    # Small startup delay so Render marks the dyno healthy first
     await asyncio.sleep(2)
 
     log.info("Starting Discord bot…")
