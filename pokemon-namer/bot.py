@@ -1,18 +1,19 @@
 import asyncio
+import base64
 import io
 import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
 
 import discord
 import aiohttp
-import imagehash
-from PIL import Image
 from aiohttp import web as aiohttp_web
+from openai import AsyncOpenAI
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +31,9 @@ if not TOKEN:
     log.error("FATAL: DISCORD_TOKEN not set!")
     sys.exit(1)
 
+AI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+AI_API_KEY  = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY", "dummy")
+
 POKETWO_BOT_ID = 716390085896962058
 
 _raw = os.environ.get("WATCH_CHANNEL_IDS", "")
@@ -39,88 +43,113 @@ DELAY_MIN = float(os.environ.get("DELAY_MIN", "2.0"))
 DELAY_MAX = float(os.environ.get("DELAY_MAX", "4.5"))
 COOLDOWN  = float(os.environ.get("COOLDOWN", "3.0"))
 
-# Max Hamming distance to accept a match (out of 256 bits for hash_size=16)
-# 0 = identical pixels, lower = stricter. 15 is very permissive for JPEG noise.
-HASH_THRESHOLD = int(os.environ.get("HASH_THRESHOLD", "15"))
-HASH_SIZE = 16  # must match build_hash_db.py
+# ── OPENAI CLIENT ──────────────────────────────────────────────────────
 
-# ── HASH DATABASE ──────────────────────────────────────────────────────
+openai_client: AsyncOpenAI | None = None
 
-HASH_DB: dict[str, str] = {}           # phash_str → pokemon_name
-HASH_OBJ: list[tuple] = []             # [(imagehash_obj, pokemon_name), ...]
-
-HASH_DB_PATH = Path(__file__).parent / "hash_db.json"
-
-
-def load_hash_db() -> None:
-    global HASH_DB, HASH_OBJ
-
-    if not HASH_DB_PATH.exists():
-        log.error(
-            "hash_db.json not found! Run: python3 pokemon-namer/build_hash_db.py"
-        )
-        return
-
-    with open(HASH_DB_PATH) as f:
-        HASH_DB = json.load(f)
-
-    HASH_OBJ = [(imagehash.hex_to_hash(h), name) for h, name in HASH_DB.items()]
-    log.info("Hash DB loaded: %d Pokemon fingerprints", len(HASH_OBJ))
+def setup_openai() -> None:
+    global openai_client
+    if AI_BASE_URL:
+        openai_client = AsyncOpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
+        log.info("OpenAI vision client ready (Replit AI Integrations)")
+    else:
+        log.warning("AI_INTEGRATIONS_OPENAI_BASE_URL not set — vision identification disabled")
 
 
-# ── IDENTIFICATION ─────────────────────────────────────────────────────
+# ── URL FAST PATH ──────────────────────────────────────────────────────
+# If Poketwo ever reverts to embedding dex IDs in their CDN URL, use it instantly.
 
-async def identify(
+POKEDEX: dict[str, str] = {}
+POKEDEX_PATH = Path(__file__).parent / "pokedex.json"
+CDN_PATTERN  = re.compile(r"poketwo\.net/images/(\d+)\.", re.IGNORECASE)
+
+
+def load_pokedex() -> None:
+    global POKEDEX
+    if POKEDEX_PATH.exists():
+        with open(POKEDEX_PATH) as f:
+            POKEDEX = json.load(f)
+        log.info("Pokedex loaded: %d entries (fast-path fallback)", len(POKEDEX))
+
+
+def identify_from_url(image_url: str) -> tuple[str | None, str]:
+    m = CDN_PATTERN.search(image_url)
+    if m:
+        name = POKEDEX.get(m.group(1))
+        if name:
+            return name, f"dex #{m.group(1)}"
+    return None, ""
+
+
+# ── VISION IDENTIFICATION ──────────────────────────────────────────────
+
+VISION_PROMPT = (
+    "This is a screenshot from the Poketwo Discord bot showing a wild Pokemon spawn. "
+    "Identify the Pokemon species shown in the image. "
+    "Reply with ONLY the Pokemon's name — no punctuation, no explanation, nothing else. "
+    "Examples of valid replies: Pikachu  |  Charizard  |  Mr. Mime  |  Sinistea"
+)
+
+
+async def identify_via_vision(
     session: aiohttp.ClientSession, image_url: str
 ) -> tuple[str | None, str]:
-    """Download the spawn image and find the closest match in the hash DB."""
-
-    if not HASH_OBJ:
-        log.warning("Hash DB is empty — run build_hash_db.py first")
+    if not openai_client:
+        log.warning("Vision client not configured")
         return None, ""
 
+    # Download image and encode as base64
     try:
         async with session.get(
             image_url, timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
             if r.status != 200:
-                log.warning("Image download failed (HTTP %d): %s", r.status, image_url)
+                log.warning("Image download failed (HTTP %d)", r.status)
                 return None, ""
-            data = await r.read()
+            img_bytes = await r.read()
+            content_type = r.content_type or "image/jpeg"
     except Exception as exc:
-        log.error("Error downloading spawn image: %s", exc)
+        log.error("Image download error: %s", exc)
         return None, ""
+
+    b64 = base64.b64encode(img_bytes).decode()
+    data_url = f"data:{content_type};base64,{b64}"
 
     try:
-        img = Image.open(io.BytesIO(data)).convert("RGBA")
-        query_hash = imagehash.phash(img, hash_size=HASH_SIZE)
-    except Exception as exc:
-        log.error("Error computing image hash: %s", exc)
-        return None, ""
-
-    best_name: str | None = None
-    best_dist = 9999
-
-    for stored_hash, name in HASH_OBJ:
-        dist = query_hash - stored_hash
-        if dist < best_dist:
-            best_dist = dist
-            best_name = name
-
-    log.info(
-        "Hash match: %s (distance=%d / threshold=%d)",
-        best_name, best_dist, HASH_THRESHOLD,
-    )
-
-    if best_dist > HASH_THRESHOLD:
-        log.warning(
-            "Best match %s rejected (distance %d > threshold %d)",
-            best_name, best_dist, HASH_THRESHOLD,
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            max_completion_tokens=32,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text",      "text": VISION_PROMPT},
+                        {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
+                    ],
+                }
+            ],
         )
-        return None, ""
+        raw = (resp.choices[0].message.content or "").strip()
+        log.info("Vision raw reply: %r", raw)
 
-    display = best_name.replace("-", " ").title() if best_name else None
-    return display, f"hash d={best_dist}"
+        # Clean up any stray punctuation GPT might sneak in
+        name = raw.strip(".,!?*_`\"'").title()
+        if name:
+            return name, "vision"
+    except Exception as exc:
+        log.error("OpenAI vision error: %s", exc)
+
+    return None, ""
+
+
+async def identify(
+    session: aiohttp.ClientSession, image_url: str
+) -> tuple[str | None, str]:
+    """Try URL fast-path first, then AI vision."""
+    name, method = identify_from_url(image_url)
+    if name:
+        return name, method
+    return await identify_via_vision(session, image_url)
 
 
 # ── SPAWN DETECTION ────────────────────────────────────────────────────
@@ -172,17 +201,14 @@ async def run_bot() -> None:
     @client.event
     async def on_ready() -> None:
         log.info(
-            "Logged in as %s (ID: %s)", client.user,
-            client.user.id if client.user else "?"
+            "Logged in as %s (ID: %s)",
+            client.user, client.user.id if client.user else "?"
         )
         log.info(
-            "Hash DB ready: %d fingerprints | threshold: %d",
-            len(HASH_OBJ), HASH_THRESHOLD,
+            "Vision: %s | Watching: %s",
+            "enabled" if openai_client else "DISABLED",
+            WATCH_CHANNEL_IDS or "all channels",
         )
-        if WATCH_CHANNEL_IDS:
-            log.info("Watching channels: %s", WATCH_CHANNEL_IDS)
-        else:
-            log.info("Watching ALL channels")
 
     @client.event
     async def on_message(message: discord.Message) -> None:
@@ -205,13 +231,11 @@ async def run_bot() -> None:
             log.info("USER CORRECTION: correct name is '%s'", correct_name)
             await message.channel.send(
                 f"Got it! The correct Pokemon was **{correct_name}**.",
-                reference=message,
-                mention_author=False,
+                reference=message, mention_author=False,
             )
             return
 
         # ── !debug ─────────────────────────────────────────────────────
-        # Dump full embed structure of a referenced message for debugging
         if content.lower() == "!debug":
             ref = message.reference
             if not ref:
@@ -219,34 +243,21 @@ async def run_bot() -> None:
                 return
             try:
                 target = (
-                    ref.resolved
-                    if isinstance(ref.resolved, discord.Message)
+                    ref.resolved if isinstance(ref.resolved, discord.Message)
                     else await message.channel.fetch_message(ref.message_id)
                 )
             except Exception as exc:
-                await message.channel.send(f"Couldn't fetch message: {exc}", mention_author=False)
+                await message.channel.send(f"Couldn't fetch: {exc}", mention_author=False)
                 return
-
-            lines = [f"**Embeds: {len(target.embeds)}**"]
+            lines = [f"Embeds: {len(target.embeds)}"]
             for i, emb in enumerate(target.embeds):
-                lines.append(f"\n__Embed {i}__")
-                lines.append(f"title: `{emb.title}`")
-                lines.append(f"description: `{emb.description}`")
-                lines.append(f"url: `{emb.url}`")
-                lines.append(f"image.url: `{emb.image.url if emb.image else None}`")
-                lines.append(f"thumbnail.url: `{emb.thumbnail.url if emb.thumbnail else None}`")
-                lines.append(f"author.icon_url: `{emb.author.icon_url if emb.author else None}`")
-                lines.append(f"author.name: `{emb.author.name if emb.author else None}`")
-                for j, f_ in enumerate(emb.fields):
-                    lines.append(f"field[{j}]: name=`{f_.name}` value=`{f_.value}`")
-            lines.append(f"\n**Attachments: {len(target.attachments)}**")
-            for att in target.attachments:
-                lines.append(f"  {att.filename}: {att.url}")
-            out = "\n".join(lines)
-            log.info("DEBUG EMBED:\n%s", out)
-            # Send in chunks if needed
-            for chunk_start in range(0, len(out), 1900):
-                await message.channel.send(f"```\n{out[chunk_start:chunk_start+1900]}\n```", mention_author=False)
+                lines += [
+                    f"[{i}] image={emb.image.url if emb.image else None}",
+                    f"[{i}] thumb={emb.thumbnail.url if emb.thumbnail else None}",
+                    f"[{i}] title={emb.title}",
+                ]
+            log.info("DEBUG: %s", "\n".join(lines))
+            await message.channel.send("```\n" + "\n".join(lines) + "\n```", mention_author=False)
             return
 
         # ── !guess ─────────────────────────────────────────────────────
@@ -254,34 +265,27 @@ async def run_bot() -> None:
             ref = message.reference
             if not ref:
                 await message.channel.send(
-                    "Reply to a Poketwo spawn message with `!guess`.",
-                    mention_author=False,
+                    "Reply to a Poketwo spawn message with `!guess`.", mention_author=False
                 )
                 return
-
             try:
                 target = (
-                    ref.resolved
-                    if isinstance(ref.resolved, discord.Message)
+                    ref.resolved if isinstance(ref.resolved, discord.Message)
                     else await message.channel.fetch_message(ref.message_id)
                 )
             except Exception as exc:
-                log.error("Could not fetch referenced message: %s", exc)
-                await message.channel.send(
-                    "Couldn't fetch that message.", mention_author=False
-                )
+                log.error("Fetch error: %s", exc)
+                await message.channel.send("Couldn't fetch that message.", mention_author=False)
                 return
 
             image_url = get_spawn_image_url(target)
             if not image_url and target.attachments:
                 image_url = target.attachments[0].url
             if not image_url:
-                await message.channel.send(
-                    "No image found in that message.", mention_author=False
-                )
+                await message.channel.send("No image found in that message.", mention_author=False)
                 return
 
-            log.info("!guess triggered — image URL: %s", image_url)
+            log.info("!guess — URL: %s", image_url)
             assert http_session is not None
             name, method = await identify(http_session, image_url)
 
@@ -289,16 +293,12 @@ async def run_bot() -> None:
                 log.info("RESULT: %s (via %s)", name, method)
                 await message.channel.send(
                     f"That's **{name}**!",
-                    reference=message,
-                    mention_author=False,
+                    reference=message, mention_author=False,
                 )
             else:
-                log.warning("Could not identify Pokemon from: %s", image_url)
                 await message.channel.send(
-                    "Sorry, I couldn't identify that Pokemon. "
-                    "Use `!correct <name>` if you know what it is.",
-                    reference=message,
-                    mention_author=False,
+                    "Sorry, I couldn't identify that Pokemon. Use `!correct <name>` if you know.",
+                    reference=message, mention_author=False,
                 )
             return
 
@@ -308,32 +308,25 @@ async def run_bot() -> None:
 
         async with semaphore:
             if on_cooldown(message.channel.id):
-                log.info(
-                    "Skipping spawn in channel %s (cooldown)", message.channel.id
-                )
+                log.info("Cooldown — skipping channel %s", message.channel.id)
                 return
 
             image_url = get_spawn_image_url(message)
             if not image_url:
-                log.warning("Spawn message had no image URL")
+                log.warning("Spawn with no image URL")
                 return
 
             assert http_session is not None
             name, method = await identify(http_session, image_url)
 
             if not name:
-                log.warning(
-                    "Could not identify Pokemon — image: %s", image_url
-                )
+                log.warning("Could not identify spawn — %s", image_url)
                 return
 
-            log.info(
-                "Auto-identified: %s (via %s) — image: %s",
-                name, method, image_url,
-            )
+            log.info("Auto-identified: %s (via %s)", name, method)
 
             delay = random.uniform(DELAY_MIN, DELAY_MAX)
-            log.info("Waiting %.2fs before posting…", delay)
+            log.info("Waiting %.2fs…", delay)
             await asyncio.sleep(delay)
 
             update_cooldown(message.channel.id)
@@ -341,15 +334,12 @@ async def run_bot() -> None:
             try:
                 await message.channel.send(
                     f"That's **{name}**!",
-                    reference=message,
-                    mention_author=False,
+                    reference=message, mention_author=False,
                 )
             except discord.Forbidden:
-                log.warning(
-                    "No permission to send in channel %s", message.channel.id
-                )
+                log.warning("No send permission in channel %s", message.channel.id)
             except discord.HTTPException as exc:
-                log.error("Failed to send message: %s", exc)
+                log.error("Send failed: %s", exc)
 
     await client.start(TOKEN)
 
@@ -365,12 +355,10 @@ async def start_web() -> None:
     app = aiohttp_web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
-
     runner = aiohttp_web.AppRunner(app)
     await runner.setup()
-    site = aiohttp_web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    log.info("Web server listening on port %d", port)
+    await aiohttp_web.TCPSite(runner, "0.0.0.0", port).start()
+    log.info("Web server on port %d", port)
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────
@@ -378,13 +366,13 @@ async def start_web() -> None:
 async def main() -> None:
     global http_session
 
+    setup_openai()
+    load_pokedex()
+
     connector = aiohttp.TCPConnector(limit=20)
     http_session = aiohttp.ClientSession(connector=connector)
 
     await start_web()
-
-    load_hash_db()
-
     await asyncio.sleep(2)
 
     log.info("Starting Discord bot…")
