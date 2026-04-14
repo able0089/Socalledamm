@@ -789,6 +789,20 @@ async def cmd_collection(msg: discord.Message, args: str) -> None:
         await msg.channel.send("Usage: `pk!cl add/remove/clear/list <pokemon>`")
 
 
+def _hunt_matches(label: str, hunt) -> bool:
+    """Check if a pokemon label matches a shiny hunt entry (string or list)."""
+    if isinstance(hunt, list):
+        return any(label_matches_query(label, h) for h in hunt)
+    return label_matches_query(label, hunt)
+
+
+def _hunt_display(hunt) -> str:
+    """Return a display string for a hunt entry (string or list)."""
+    if isinstance(hunt, list):
+        return ", ".join(label_to_display(h) for h in hunt)
+    return label_to_display(hunt)
+
+
 async def cmd_shiny(msg: discord.Message, args: str) -> None:
     uid = str(msg.author.id)
     if not args or args.lower() == "clear":
@@ -796,6 +810,20 @@ async def cmd_shiny(msg: discord.Message, args: str) -> None:
         _save()
         return await msg.channel.send("✅ Shiny hunt cleared.", reference=msg, mention_author=False)
     query = args.strip().lower()
+    if query.startswith("all "):
+        species = query[4:].strip()
+        forms = find_all_forms(species)
+        if not forms:
+            return await msg.channel.send(
+                f"No forms found for **{species.title()}**. Check the spelling and try again.",
+                reference=msg, mention_author=False)
+        prev = _data["user_shiny_hunts"].get(uid)
+        _data["user_shiny_hunts"][uid] = forms
+        _save()
+        text = f"✅ Shiny hunt set to all forms of **{species.title()}**: {', '.join(label_to_display(f) for f in forms)}!"
+        if prev:
+            text += f" (replaced **{_hunt_display(prev)}**)"
+        return await msg.channel.send(text, reference=msg, mention_author=False)
     matched = next((lbl for lbl in class_names if label_matches_query(lbl, query)), None)
     if matched is None:
         return await msg.channel.send(
@@ -806,7 +834,7 @@ async def cmd_shiny(msg: discord.Message, args: str) -> None:
     _save()
     text = f"✅ Shiny hunt set to **{label_to_display(matched)}**!"
     if prev:
-        text += f" (replaced **{label_to_display(prev)}**)"
+        text += f" (replaced **{_hunt_display(prev)}**)"
     await msg.channel.send(text, reference=msg, mention_author=False)
 
 
@@ -981,7 +1009,7 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
             hunt = _data["user_shiny_hunts"].get(str(uid))
             if not hunt:
                 return await msg.channel.send(f"`{uid}` has no active shiny hunt.")
-            await msg.channel.send(f"**{uid}** is hunting: **{label_to_display(hunt)}**")
+            await msg.channel.send(f"**{uid}** is hunting: **{_hunt_display(hunt)}**")
         else:
             await msg.channel.send("Use `cl` or `sh`.")
 
@@ -990,7 +1018,7 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
         hunts = _data["user_shiny_hunts"]
         if not hunts:
             return await msg.channel.send("No active shiny hunts.")
-        lines = [f"<@{uid}> → **{label_to_display(p)}**" for uid, p in list(hunts.items())[:20]]
+        lines = [f"<@{uid}> → **{_hunt_display(p)}**" for uid, p in list(hunts.items())[:20]]
         embed = discord.Embed(title=f"Active Shiny Hunts ({len(hunts)})", description="\n".join(lines), color=0xFEE75C)
         if len(hunts) > 20:
             embed.set_footer(text=f"Showing 20/{len(hunts)}")
@@ -1159,14 +1187,14 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
 
         if ch_cfg.get("rareping", True) and is_rare(pokemon, gid):
             rid  = cfg_g.get("rare_role")
-            lines.append(f"🌟 Rare: {f'<@&{rid}>' if rid else '*(rare role not set)*'}")
+            lines.append(f"🌟 Rare ping: {f'<@&{rid}>' if rid else '*(rare role not set)*'}")
 
         if ch_cfg.get("regionalpinging", True) and is_regional(pokemon, gid):
             rid  = cfg_g.get("regional_role")
-            lines.append(f"🗺️ Regional: {f'<@&{rid}>' if rid else '*(regional role not set)*'}")
+            lines.append(f"🗺️ Regional ping: {f'<@&{rid}>' if rid else '*(regional role not set)*'}")
 
         hunters = [uid for uid, h in _data["user_shiny_hunts"].items()
-                   if label_matches_query(pokemon, h)]
+                   if _hunt_matches(pokemon, h)]
         if ch_cfg.get("shinyhunt", True) and hunters:
             lines.append(f"✨ Shiny hunt pings: {' '.join(f'<@{u}>' for u in hunters)}")
 
@@ -1239,17 +1267,17 @@ async def handle_spawn(msg: discord.Message) -> None:
             rid  = _guild_cfg(guild_id).get("rare_role")
             if rid:
                 role = msg.guild.get_role(int(rid))
-                lines.append(f"🌟 Rare: {role.mention if role else f'<@&{rid}>'}")
+                lines.append(f"🌟 Rare ping: {role.mention if role else f'<@&{rid}>'}")
 
         if ch_cfg.get("regionalpinging", True) and is_regional(label, guild_id):
             rid  = _guild_cfg(guild_id).get("regional_role")
             if rid:
                 role = msg.guild.get_role(int(rid))
-                lines.append(f"🗺️ Regional: {role.mention if role else f'<@&{rid}>'}")
+                lines.append(f"🗺️ Regional ping: {role.mention if role else f'<@&{rid}>'}")
 
         if ch_cfg.get("shinyhunt", True):
             hunters = [uid for uid, h in _data["user_shiny_hunts"].items()
-                       if label_matches_query(label, h)]
+                       if _hunt_matches(label, h)]
             if hunters:
                 lines.append(f"✨ Shiny hunt pings: {' '.join(f'<@{u}>' for u in hunters)}")
 
