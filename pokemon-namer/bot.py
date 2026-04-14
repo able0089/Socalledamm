@@ -202,9 +202,9 @@ LABEL_TO_DISPLAY: dict[str, str] = {
     "ogerpon-hearthflame-mask": "Hearthflame Mask Ogerpon",
     "ogerpon-cornerstone-mask": "Cornerstone Mask Ogerpon",
     # ── Tauros Paldean breeds ──────────────────────────────────────────
-    "tauros-paldea-combat-breed": "Paldean Combat Breed Tauros",
-    "tauros-paldea-blaze-breed":  "Paldean Blaze Breed Tauros",
-    "tauros-paldea-aqua-breed":   "Paldean Aqua Breed Tauros",
+    "tauros-paldea-combat-breed": "Combat Breed Tauros",
+    "tauros-paldea-blaze-breed":  "Blaze Breed Tauros",
+    "tauros-paldea-aqua-breed":   "Aqua Breed Tauros",
     # ── Terapagos ──────────────────────────────────────────────────────
     "terapagos-terastal":       "Terastal Terapagos",
     # ── Maushold ───────────────────────────────────────────────────────
@@ -332,45 +332,119 @@ def label_matches_query(label: str, query: str) -> bool:
 
 # ── DEFAULT RARE / REGIONAL LISTS ──────────────────────────────────────
 
-DEFAULT_RARES = {
-    "mewtwo","mew","lugia","ho-oh","celebi","kyogre","groudon","rayquaza",
-    "jirachi","deoxys","deoxys-normal","deoxys-attack","deoxys-defense","deoxys-speed",
-    "dialga","palkia","giratina","giratina-origin","dialga-origin","palkia-origin",
-    "arceus","victini","reshiram","zekrom","kyurem","kyurem-black","kyurem-white",
-    "keldeo","keldeo-resolute","meloetta","meloetta-pirouette","genesect",
-    "xerneas","yveltal","zygarde","zygarde-10","zygarde-complete",
+DEFAULT_RARES: set[str] = {
+    # Gen 1
+    "mewtwo","mew","articuno","zapdos","moltres",
+    "articuno-galar","zapdos-galar","moltres-galar",
+    # Gen 2
+    "raikou","entei","suicune","lugia","ho-oh","celebi",
+    # Gen 3
+    "regirock","regice","registeel","latias","latios",
+    "kyogre","groudon","rayquaza","jirachi",
+    "deoxys","deoxys-normal","deoxys-attack","deoxys-defense","deoxys-speed",
+    # Gen 4
+    "uxie","mesprit","azelf","dialga","palkia","dialga-origin","palkia-origin",
+    "heatran","regigigas","giratina","giratina-origin","cresselia",
+    "phione","manaphy","darkrai","shaymin","shaymin-sky","arceus",
+    # Gen 5
+    "victini","cobalion","terrakion","virizion",
+    "tornadus","tornadus-therian","thundurus","thundurus-therian",
+    "reshiram","zekrom","landorus","landorus-therian",
+    "kyurem","kyurem-black","kyurem-white",
+    "keldeo","keldeo-resolute","meloetta","meloetta-pirouette",
+    "genesect","high-speed_flight_configuration_genesect",
+    # Gen 6
+    "xerneas","yveltal",
+    "zygarde","zygarde-10","zygarde-complete","zygarde-cell","zygarde-core",
     "diancie","hoopa","hoopa-unbound","volcanion",
-    "cosmog","cosmoem","solgaleo","lunala","necrozma",
-    "necrozma-dusk-mane","necrozma-dawn-wings",
+    # Gen 7
+    "type-null","silvally",
+    "tapu-koko","tapu-lele","tapu-bulu","tapu-fini",
+    "cosmog","cosmoem","solgaleo","lunala",
+    "necrozma","necrozma-dusk-mane","necrozma-dawn-wings",
+    "nihilego","buzzwole","pheromosa","xurkitree","celesteela",
+    "kartana","guzzlord","poipole","naganadel","stakataka","blacephalon",
     "magearna","marshadow","zeraora","meltan","melmetal",
-    "zacian","zacian-crowned","zamazenta","zamazenta-crowned",
-    "eternatus","kubfu","urshifu","urshifu-rapid-strike",
-    "zarude","zarude-dada","regieleki","regidrago",
-    "glastrier","spectrier","calyrex","calyrex-ice","calyrex-shadow",
-    "enamorus","enamorus-therian",
-    "koraidon","miraidon","wo-chien","chien-pao","ting-lu","chi-yu",
-    "iron-valiant","iron-leaves","walking-wake","gouging-fire","raging-bolt",
-    "iron-boulder","iron-crown","terapagos","terapagos-terastal","pecharunt",
-    "ursaluna-bloodmoon",
+    # Gen 8
+    "zacian","zacian-crowned","zamazenta","zamazenta-crowned","eternatus",
+    "kubfu","urshifu","urshifu-rapid-strike",
+    "regieleki","regidrago","glastrier","spectrier",
+    "calyrex","calyrex-ice","calyrex-shadow",
+    "enamorus","enamorus-therian","zarude","zarude-dada",
+    # Gen 9
+    "koraidon","miraidon",
+    "wo-chien","ting-lu","chien-pao","chi-yu",
+    "munkidori","okidogi","fezandipiti",
+    "ogerpon","ogerpon-wellspring-mask","ogerpon-hearthflame-mask","ogerpon-cornerstone-mask",
+    "terapagos","terapagos-terastal","pecharunt",
 }
 
-REGIONAL_SUFFIXES = ("-galar", "-alola", "-hisui", "-paldea")
+DEFAULT_REGIONALS: set[str] = {
+    # Alolan forms
+    "diglett-alola","dugtrio-alola","exeggutor-alola","geodude-alola",
+    "golem-alola","graveler-alola","grimer-alola","marowak-alola",
+    "meowth-alola","muk-alola","ninetales-alola","persian-alola",
+    "raichu-alola","raticate-alola","rattata-alola","sandshrew-alola",
+    "sandslash-alola","vulpix-alola",
+    # Galarian forms
+    "corsola-galar","darmanitan-galar","darmanitan-zen-galar","darumaka-galar",
+    "farfetchd-galar","linoone-galar","meowth-galar","mr-mime-galar",
+    "ponyta-galar","rapidash-galar","slowbro-galar","slowking-galar",
+    "slowpoke-galar","stunfisk-galar","weezing-galar","yamask-galar",
+    "zigzagoon-galar",
+    # Hisuian forms
+    "arcanine-hisui","avalugg-hisui","braviary-hisui","decidueye-hisui",
+    "electrode-hisui","goodra-hisui","growlithe-hisui","lilligant-hisui",
+    "qwilfish-hisui","samurott-hisui","sliggoo-hisui","sneasel-hisui",
+    "typhlosion-hisui","voltorb-hisui","zoroark-hisui","zorua-hisui",
+    # Paldean forms & breeds
+    "wooper-paldea",
+    "tauros-paldea-combat-breed","tauros-paldea-blaze-breed","tauros-paldea-aqua-breed",
+    # Regional evolutions (no form suffix)
+    "cursola","overqwil","runerigus","perrserker",
+    "basculegion","basculegion-male","basculegion-female",
+    "sneasler","mr-rime","obstagoon","sirfetchd",
+}
 
 
-def is_rare(label: str, guild_id: int) -> bool:
-    cfg = _data["guild_settings"].get(str(guild_id), {})
-    custom = cfg.get("rare_pokemon", [])
-    if custom:
-        return any(label_matches_query(label, x) for x in custom)
+def is_rare(label: str, _guild_id: int = 0) -> bool:
     return label.lower() in DEFAULT_RARES
 
 
-def is_regional(label: str, guild_id: int) -> bool:
-    cfg = _data["guild_settings"].get(str(guild_id), {})
-    custom = cfg.get("regional_pokemon", [])
-    if custom:
-        return any(label_matches_query(label, x) for x in custom)
-    return any(label.lower().endswith(s) for s in REGIONAL_SUFFIXES)
+def is_regional(label: str, _guild_id: int = 0) -> bool:
+    return label.lower() in DEFAULT_REGIONALS
+
+
+def find_all_forms(species: str) -> list[str]:
+    """Return all model labels for a species including every form.
+    e.g. 'tatsugiri' → ['tatsugiri', 'tatsugiri-droopy', 'tatsugiri-stretchy']
+    """
+    q = normalize_query(species)
+    results = []
+    for lbl in class_names:
+        lbl_norm = normalize_query(lbl)
+        if lbl_norm == q or lbl_norm.startswith(q + "-") or lbl_norm.startswith(q + "_"):
+            results.append(lbl)
+    return results
+
+
+def _resolve_pokemon_query(query: str) -> tuple[list[str], list[str]]:
+    """Resolve a single query string to (matched_labels, invalid_terms).
+    Supports 'all <species>' expansion.
+    """
+    query = query.strip().lower()
+    if query.startswith("all "):
+        species = query[4:].strip()
+        forms = find_all_forms(species)
+        if forms:
+            return forms, []
+        return [], [query]
+    matched = next((lbl for lbl in class_names if label_matches_query(lbl, query)), None)
+    if matched:
+        return [matched], []
+    return [], [query]
+
+
 
 
 # ── ONNX CLASSIFIER ────────────────────────────────────────────────────
@@ -603,14 +677,6 @@ async def handle_command(msg: discord.Message, client: discord.Client) -> None:
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
         await cmd_settings(msg, args)
-    elif cmd == "rares":
-        if not is_admin(msg.author):
-            return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
-        await cmd_rares(msg, args)
-    elif cmd == "regionals":
-        if not is_admin(msg.author):
-            return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
-        await cmd_regionals(msg, args)
     elif cmd == "channelsettings":
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
@@ -641,7 +707,9 @@ async def cmd_help(msg: discord.Message) -> None:
     ), inline=False)
     embed.add_field(name="\U0001f4e6 Collection Pings", value=(
         "`pk!cl add <pokemon, ...>` — add to your list\n"
+        "`pk!cl add all <species>` — add all forms (e.g. `all tatsugiri`)\n"
         "`pk!cl remove <pokemon, ...>` — remove from list\n"
+        "`pk!cl clear` — clear your entire list\n"
         "`pk!cl list` — view your list"
     ), inline=False)
     embed.add_field(name="\u2728 Shiny Hunting", value=(
@@ -651,8 +719,6 @@ async def cmd_help(msg: discord.Message) -> None:
     embed.add_field(name="\u2699\ufe0f Admin — Server", value=(
         "`pk!settings rare-role <@role/id>` — set rare ping role\n"
         "`pk!settings regional-role <@role/id>` — set regional ping role\n"
-        "`pk!rares <list>` — override rare list (empty = reset to default)\n"
-        "`pk!regionals <list>` — override regional list\n"
         "`pk!channelsettings` — view/toggle channel features"
     ), inline=False)
     embed.set_footer(text="Prefix: pk! or @mention the bot")
@@ -667,22 +733,21 @@ async def cmd_collection(msg: discord.Message, args: str) -> None:
 
     if sub == "add":
         if not rest:
-            return await msg.channel.send("Usage: `pk!cl add <pokemon, ...>`")
-        added = []
-        invalid = []
-        already = []
+            return await msg.channel.send("Usage: `pk!cl add <pokemon, ...>` or `pk!cl add all <species>`")
+        added: list[str] = []
+        invalid: list[str] = []
+        already: list[str] = []
         for p in pokemon_list_from_args(rest):
             if not p:
                 continue
-            # Check against known model labels
-            matched = next((lbl for lbl in class_names if label_matches_query(lbl, p)), None)
-            if matched is None:
-                invalid.append(p)
-            elif matched in col:
-                already.append(matched)
-            else:
-                col.append(matched)
-                added.append(matched)
+            matches, inv = _resolve_pokemon_query(p)
+            invalid.extend(inv)
+            for matched in matches:
+                if matched in col:
+                    already.append(matched)
+                else:
+                    col.append(matched)
+                    added.append(matched)
         _save()
         lines = []
         if added:
@@ -702,9 +767,15 @@ async def cmd_collection(msg: discord.Message, args: str) -> None:
             col.remove(p)
         _save()
         await msg.channel.send(
-            f"✅ Removed: **{', '.join(p.title() for p in removed)}**" if removed
+            f"✅ Removed: **{', '.join(label_to_display(p) for p in removed)}**" if removed
             else "None of those were in your list.",
             reference=msg, mention_author=False)
+
+    elif sub == "clear":
+        uid = str(msg.author.id)
+        _data["user_collections"][uid] = []
+        _save()
+        await msg.channel.send("✅ Your collection list has been cleared.", reference=msg, mention_author=False)
 
     elif sub == "list":
         if not col:
@@ -715,7 +786,7 @@ async def cmd_collection(msg: discord.Message, args: str) -> None:
             color=0x57F287)
         await msg.channel.send(embed=embed)
     else:
-        await msg.channel.send("Usage: `pk!cl add/remove/list <pokemon>`")
+        await msg.channel.send("Usage: `pk!cl add/remove/clear/list <pokemon>`")
 
 
 async def cmd_shiny(msg: discord.Message, args: str) -> None:
@@ -724,11 +795,16 @@ async def cmd_shiny(msg: discord.Message, args: str) -> None:
         _data["user_shiny_hunts"].pop(uid, None)
         _save()
         return await msg.channel.send("✅ Shiny hunt cleared.", reference=msg, mention_author=False)
-    pokemon = args.strip().lower()
-    prev    = _data["user_shiny_hunts"].get(uid)
-    _data["user_shiny_hunts"][uid] = pokemon
+    query = args.strip().lower()
+    matched = next((lbl for lbl in class_names if label_matches_query(lbl, query)), None)
+    if matched is None:
+        return await msg.channel.send(
+            f"Invalid Pokémon: **{query.title()}**. Check the spelling and try again.",
+            reference=msg, mention_author=False)
+    prev = _data["user_shiny_hunts"].get(uid)
+    _data["user_shiny_hunts"][uid] = matched
     _save()
-    text = f"✅ Shiny hunt set to **{label_to_display(pokemon)}**!"
+    text = f"✅ Shiny hunt set to **{label_to_display(matched)}**!"
     if prev:
         text += f" (replaced **{label_to_display(prev)}**)"
     await msg.channel.send(text, reference=msg, mention_author=False)
@@ -753,30 +829,6 @@ async def cmd_settings(msg: discord.Message, args: str) -> None:
         await msg.channel.send("Available settings: `rare-role`, `regional-role`")
 
 
-async def cmd_rares(msg: discord.Message, args: str) -> None:
-    if not args:
-        _guild_cfg(msg.guild.id)["rare_pokemon"] = []
-        _save()
-        return await msg.channel.send("✅ Rare list reset to built-in defaults.")
-    names = pokemon_list_from_args(args)
-    _guild_cfg(msg.guild.id)["rare_pokemon"] = names
-    _save()
-    await msg.channel.send(
-        f"✅ Rare list set ({len(names)} Pokémon): **{', '.join(label_to_display(n) for n in names)}**",
-        reference=msg, mention_author=False)
-
-
-async def cmd_regionals(msg: discord.Message, args: str) -> None:
-    if not args:
-        _guild_cfg(msg.guild.id)["regional_pokemon"] = []
-        _save()
-        return await msg.channel.send("✅ Regional list reset to built-in defaults (auto-detects by form suffix).")
-    names = pokemon_list_from_args(args)
-    _guild_cfg(msg.guild.id)["regional_pokemon"] = names
-    _save()
-    await msg.channel.send(
-        f"✅ Regional list set ({len(names)} Pokémon): **{', '.join(label_to_display(n) for n in names)}**",
-        reference=msg, mention_author=False)
 
 
 CHANNEL_TOGGLES = {
@@ -961,13 +1013,11 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
         cfg = _data["guild_settings"].get(str(msg.guild.id), {})
         rr  = cfg.get("rare_role")
         rer = cfg.get("regional_role")
-        rp  = cfg.get("rare_pokemon", [])
-        rep = cfg.get("regional_pokemon", [])
         embed = discord.Embed(title="Guild Settings", color=0xEB459E)
         embed.add_field(name="Rare role",     value=f"<@&{rr}>" if rr else "Not set")
         embed.add_field(name="Regional role", value=f"<@&{rer}>" if rer else "Not set")
-        embed.add_field(name="Custom rares",  value=", ".join(label_to_display(p) for p in rp) or "Using defaults", inline=False)
-        embed.add_field(name="Custom regionals", value=", ".join(label_to_display(p) for p in rep) or "Using defaults (form suffix)", inline=False)
+        embed.add_field(name="Rare list",     value="Built-in (hardcoded)", inline=False)
+        embed.add_field(name="Regional list", value="Built-in (hardcoded)", inline=False)
         await msg.channel.send(embed=embed)
 
     # ── channelinfo ───────────────────────────────────────────────────
