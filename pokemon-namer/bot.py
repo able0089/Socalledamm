@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -51,12 +52,11 @@ DATA_PATH = Path(__file__).parent / "data.json"
 _data_lock = threading.Lock()
 
 _DEFAULT_DATA: dict = {
-    "guild_settings":   {},   # gid -> {rare_role, regional_role, rare_pokemon, regional_pokemon}
-    "channel_settings": {},   # cid -> {naming, rareping, regionalpinging, shinyhunt, collectionping}
-    "user_collections": {},   # uid -> [pokemon, ...]
-    "user_shiny_hunts": {},   # uid -> pokemon
+    "guild_settings":   {},
+    "channel_settings": {},
+    "user_collections": {},
+    "user_shiny_hunts": {},
 }
-
 _data: dict = {}
 
 
@@ -66,9 +66,9 @@ def _load() -> None:
         with open(DATA_PATH) as f:
             _data = json.load(f)
         for k, v in _DEFAULT_DATA.items():
-            _data.setdefault(k, v)
+            _data.setdefault(k, type(v)())
     else:
-        _data = {k: dict(v) if isinstance(v, dict) else list(v) for k, v in _DEFAULT_DATA.items()}
+        _data = {k: type(v)() for k, v in _DEFAULT_DATA.items()}
 
 
 def _save() -> None:
@@ -104,37 +104,157 @@ def _user_col(user_id: int) -> list:
     return _data["user_collections"][u]
 
 
-# ── DEFAULT RARE / REGIONAL LISTS ──────────────────────────────────────
+# ── IDENTIFICATION LOG (in-memory, last 50) ────────────────────────────
 
-DEFAULT_RARES = {
-    "mewtwo","mew","lugia","ho-oh","celebi","kyogre","groudon","rayquaza",
-    "jirachi","deoxys","dialga","palkia","giratina","arceus","victini",
-    "reshiram","zekrom","kyurem","keldeo","meloetta","genesect",
-    "xerneas","yveltal","zygarde","diancie","hoopa","volcanion",
-    "cosmog","cosmoem","solgaleo","lunala","necrozma","magearna",
-    "marshadow","zeraora","meltan","melmetal",
-    "zacian","zamazenta","eternatus","kubfu","urshifu","zarude",
-    "regieleki","regidrago","glastrier","spectrier","calyrex",
-    "enamorus","koraidon","miraidon","wo-chien","chien-pao","ting-lu","chi-yu",
-    "iron-valiant","iron-leaves","walking-wake","gouging-fire","raging-bolt",
-    "iron-boulder","iron-crown","terapagos","pecharunt",
-}
+recent_ids: deque = deque(maxlen=50)  # (timestamp, label, display, channel_id, method)
 
-REGIONAL_SUFFIXES = ("-galar", "-alola", "-hisui", "-paldea")
+# ── DISPLAY NAME MAPPING ───────────────────────────────────────────────
+# Explicit overrides so every label matches Poketwo's exact naming.
+# Fallback logic handles simple regionals automatically.
 
-REGIONAL_PREFIX_MAP = {
-    "-galar":  "Galarian",
-    "-alola":  "Alolan",
-    "-hisui":  "Hisuian",
-    "-paldea": "Paldean",
-}
-
-NAME_FIXES = {
-    "farfetchd": "Farfetch'd",
-    "sirfetchd":  "Sirfetch'd",
-    "mr-mime":    "Mr. Mime",
-    "mr-rime":    "Mr. Rime",
+LABEL_TO_DISPLAY: dict[str, str] = {
+    # ── Regionals with double form (Galarian Zen etc.) ─────────────────
+    "darmanitan-zen-galar":     "Galarian Zen Darmanitan",
+    "darmanitan-galar":         "Galarian Darmanitan",
+    "darmanitan-zen":           "Zen Darmanitan",
+    # ── Oricorio ───────────────────────────────────────────────────────
+    "oricorio-baile":           "Baile Oricorio",
+    "oricorio-pom-pom":         "Pom-Pom Oricorio",
+    "oricorio-pau":             "Pa\u2019u Oricorio",
+    "oricorio-sensu":           "Sensu Oricorio",
+    # ── Tatsugiri ──────────────────────────────────────────────────────
+    "tatsugiri-droopy":         "Droopy Tatsugiri",
+    "tatsugiri-stretchy":       "Stretchy Tatsugiri",
+    "tatsugiri-curly":          "Curly Tatsugiri",
+    # ── Lycanroc ───────────────────────────────────────────────────────
+    "lycanroc-midday":          "Midday Lycanroc",
+    "lycanroc-midnight":        "Midnight Lycanroc",
+    "lycanroc-dusk":            "Dusk Lycanroc",
+    # ── Rotom ──────────────────────────────────────────────────────────
+    "rotom-heat":               "Heat Rotom",
+    "rotom-wash":               "Wash Rotom",
+    "rotom-frost":              "Frost Rotom",
+    "rotom-fan":                "Fan Rotom",
+    "rotom-mow":                "Mow Rotom",
+    # ── Calyrex ────────────────────────────────────────────────────────
+    "calyrex-ice":              "Ice Rider Calyrex",
+    "calyrex-shadow":           "Shadow Rider Calyrex",
+    # ── Kyurem ─────────────────────────────────────────────────────────
+    "kyurem-black":             "Black Kyurem",
+    "kyurem-white":             "White Kyurem",
+    # ── Necrozma ───────────────────────────────────────────────────────
+    "necrozma-dusk-mane":       "Dusk Mane Necrozma",
+    "necrozma-dawn-wings":      "Dawn Wings Necrozma",
+    # ── Forces of Nature ───────────────────────────────────────────────
+    "tornadus-therian":         "Therian Tornadus",
+    "thundurus-therian":        "Therian Thundurus",
+    "landorus-therian":         "Therian Landorus",
+    "enamorus-therian":         "Therian Enamorus",
+    # ── Deoxys ─────────────────────────────────────────────────────────
+    "deoxys-normal":            "Normal Deoxys",
+    "deoxys-attack":            "Attack Deoxys",
+    "deoxys-defense":           "Defense Deoxys",
+    "deoxys-speed":             "Speed Deoxys",
+    # ── Giratina / Shaymin / misc legendary forms ──────────────────────
+    "giratina-origin":          "Origin Giratina",
+    "shaymin-sky":              "Sky Shaymin",
+    "hoopa-unbound":            "Unbound Hoopa",
+    "keldeo-resolute":          "Resolute Keldeo",
+    "meloetta-pirouette":       "Pirouette Meloetta",
+    "zygarde-10":               "10% Zygarde",
+    "zygarde-complete":         "Complete Zygarde",
+    "zygarde-cell":             "Zygarde Cell",
+    "zygarde-core":             "Zygarde Core",
+    # ── Origin forms ───────────────────────────────────────────────────
+    "dialga-origin":            "Origin Dialga",
+    "palkia-origin":            "Origin Palkia",
+    # ── Urshifu ────────────────────────────────────────────────────────
+    "urshifu-rapid-strike":     "Rapid Strike Urshifu",
+    # ── Zacian / Zamazenta ─────────────────────────────────────────────
+    "zacian-crowned":           "Crowned Sword Zacian",
+    "zamazenta-crowned":        "Crowned Shield Zamazenta",
+    # ── Toxtricity ─────────────────────────────────────────────────────
+    "toxtricity-amped":         "Amped Toxtricity",
+    "toxtricity-low-key":       "Low Key Toxtricity",
+    # ── Wishiwashi / Aegislash ─────────────────────────────────────────
+    "wishiwashi-school":        "School Wishiwashi",
+    "aegislash-blade":          "Blade Aegislash",
+    # ── Palafin ────────────────────────────────────────────────────────
+    "palafin-hero":             "Hero Palafin",
+    # ── Ursaluna ───────────────────────────────────────────────────────
+    "ursaluna-bloodmoon":       "Blood Moon Ursaluna",
+    # ── Wormadam ───────────────────────────────────────────────────────
+    "wormadam-sandy":           "Sandy Wormadam",
+    "wormadam-trash":           "Trash Wormadam",
+    # ── Castform ───────────────────────────────────────────────────────
+    "castform-sunny":           "Sunny Castform",
+    "castform-rainy":           "Rainy Castform",
+    "castform-snowy":           "Snowy Castform",
+    # ── Cramorant ──────────────────────────────────────────────────────
+    "cramorant-gulping":        "Gulping Cramorant",
+    "cramorant-gorging":        "Gorging Cramorant",
+    # ── Morpeko ────────────────────────────────────────────────────────
+    "morpeko-hangry":           "Hangry Morpeko",
+    # ── Eiscue ─────────────────────────────────────────────────────────
+    "eiscue-noice":             "Noice Face Eiscue",
+    # ── Ogerpon ────────────────────────────────────────────────────────
+    "ogerpon-wellspring-mask":  "Wellspring Mask Ogerpon",
+    "ogerpon-hearthflame-mask": "Hearthflame Mask Ogerpon",
+    "ogerpon-cornerstone-mask": "Cornerstone Mask Ogerpon",
+    # ── Tauros Paldean breeds ──────────────────────────────────────────
+    "tauros-paldea-combat-breed": "Paldean Combat Breed Tauros",
+    "tauros-paldea-blaze-breed":  "Paldean Blaze Breed Tauros",
+    "tauros-paldea-aqua-breed":   "Paldean Aqua Breed Tauros",
+    # ── Terapagos ──────────────────────────────────────────────────────
+    "terapagos-terastal":       "Terastal Terapagos",
+    # ── Maushold ───────────────────────────────────────────────────────
+    "maushold-family-of-four":  "Family of Four Maushold",
+    "maushold-family-of-three": "Family of Three Maushold",
+    # ── Dudunsparce ────────────────────────────────────────────────────
+    "dudunsparce-three-segment": "Three-Segment Dudunsparce",
+    # ── Squawkabilly ───────────────────────────────────────────────────
+    "squawkabilly-blue-plumage":   "Blue Plumage Squawkabilly",
+    "squawkabilly-yellow-plumage": "Yellow Plumage Squawkabilly",
+    "squawkabilly-white-plumage":  "White Plumage Squawkabilly",
+    # ── Basculin ───────────────────────────────────────────────────────
+    "basculin-red-striped":     "Red-Striped Basculin",
+    "basculin-blue-striped":    "Blue-Striped Basculin",
+    "basculin-white-striped":   "White-Striped Basculin",
+    # ── Gender forms ───────────────────────────────────────────────────
+    "basculegion-male":         "Male Basculegion",
+    "basculegion-female":       "Female Basculegion",
+    "indeedee-male":            "Male Indeedee",
+    "indeedee-female":          "Female Indeedee",
+    "meowstic-male":            "Male Meowstic",
+    "meowstic-female":          "Female Meowstic",
+    "pyroar-female":            "Female Pyroar",
+    "frillish-female":          "Female Frillish",
+    "jellicent-female":         "Female Jellicent",
+    "hippopotas-female":        "Female Hippopotas",
+    "hippowdon-female":         "Female Hippowdon",
+    "unfezant-female":          "Female Unfezant",
+    "oinkologne-female":        "Female Oinkologne",
+    "oinkologne-male":          "Male Oinkologne",
+    # ── Misc ───────────────────────────────────────────────────────────
+    "greninja-ash":             "Ash-Greninja",
+    "zarude-dada":              "Dada Zarude",
+    "gimmighoul-roaming":       "Roaming Form Gimmighoul",
+    "partner-pikachu":          "Partner Pikachu",
+    "partner-eevee":            "Partner Eevee",
+    "spiky-eared_pichu":        "Spiky-Eared Pichu",
+    "busted-mimikyu":           "Busted Mimikyu",
+    "high-speed_flight_configuration_genesect": "High-Speed Flight Genesect",
+    # ── Special characters ─────────────────────────────────────────────
+    "nidoran-f":  "Nidoran\u2640",
+    "nidoran-m":  "Nidoran\u2642",
+    "farfetchd":  "Farfetch\u2019d",
+    "farfetchd-galar": "Galarian Farfetch\u2019d",
+    "sirfetchd":  "Sirfetch\u2019d",
     "ho-oh":      "Ho-Oh",
+    "mr-mime":    "Mr. Mime",
+    "mr-mime-galar": "Galarian Mr. Mime",
+    "mr-rime":    "Mr. Rime",
+    "mime-jr":    "Mime Jr.",
     "porygon-z":  "Porygon-Z",
     "type-null":  "Type: Null",
     "jangmo-o":   "Jangmo-o",
@@ -144,69 +264,97 @@ NAME_FIXES = {
     "chien-pao":  "Chien-Pao",
     "ting-lu":    "Ting-Lu",
     "chi-yu":     "Chi-Yu",
-    "flutter-mane": "Flutter Mane",
-    "iron-valiant": "Iron Valiant",
-    "iron-leaves":  "Iron Leaves",
-    "iron-boulder": "Iron Boulder",
-    "iron-crown":   "Iron Crown",
-    "walking-wake": "Walking Wake",
-    "gouging-fire": "Gouging Fire",
-    "raging-bolt":  "Raging Bolt",
-    "sandy-shocks": "Sandy Shocks",
-    "scream-tail":  "Scream Tail",
-    "brute-bonnet": "Brute Bonnet",
-    "slither-wing": "Slither Wing",
-    "roaring-moon": "Roaring Moon",
-    "great-tusk":   "Great Tusk",
-    "iron-treads":  "Iron Treads",
-    "iron-moth":    "Iron Moth",
-    "iron-hands":   "Iron Hands",
-    "iron-jugulis": "Iron Jugulis",
-    "iron-thorns":  "Iron Thorns",
-    "iron-bundle":  "Iron Bundle",
-    "nidoran-f":    "Nidoran♀",
-    "nidoran-m":    "Nidoran♂",
-    "mime-jr":      "Mime Jr.",
-    "mr-rime":      "Mr. Rime",
-    "flabebe":      "Flabébé",
+    "tapu-koko":  "Tapu Koko",
+    "tapu-lele":  "Tapu Lele",
+    "tapu-bulu":  "Tapu Bulu",
+    "tapu-fini":  "Tapu Fini",
+    "flutter-mane":   "Flutter Mane",
+    "iron-valiant":   "Iron Valiant",
+    "iron-leaves":    "Iron Leaves",
+    "iron-boulder":   "Iron Boulder",
+    "iron-crown":     "Iron Crown",
+    "iron-treads":    "Iron Treads",
+    "iron-hands":     "Iron Hands",
+    "iron-moth":      "Iron Moth",
+    "iron-jugulis":   "Iron Jugulis",
+    "iron-thorns":    "Iron Thorns",
+    "iron-bundle":    "Iron Bundle",
+    "walking-wake":   "Walking Wake",
+    "gouging-fire":   "Gouging Fire",
+    "raging-bolt":    "Raging Bolt",
+    "sandy-shocks":   "Sandy Shocks",
+    "scream-tail":    "Scream Tail",
+    "brute-bonnet":   "Brute Bonnet",
+    "slither-wing":   "Slither Wing",
+    "roaring-moon":   "Roaring Moon",
+    "great-tusk":     "Great Tusk",
+    "flabebe":        "Flab\u00e9b\u00e9",
+}
+
+REGIONAL_PREFIX_MAP = {
+    "-galar":  "Galarian",
+    "-alola":  "Alolan",
+    "-hisui":  "Hisuian",
+    "-paldea": "Paldean",
 }
 
 
 def label_to_display(label: str) -> str:
-    """Convert model label (e.g. 'farfetchd-galar') to display name ('Galarian Farfetch\\'d')."""
-    label = label.lower()
-    prefix = ""
-    for suffix, pfx in REGIONAL_PREFIX_MAP.items():
+    """Convert model label to Poketwo display name."""
+    label = label.lower().strip()
+
+    # Explicit override table first
+    if label in LABEL_TO_DISPLAY:
+        return LABEL_TO_DISPLAY[label]
+
+    # Regional prefix fallback (e.g. sandshrew-alola → Alolan Sandshrew)
+    for suffix, prefix in REGIONAL_PREFIX_MAP.items():
         if label.endswith(suffix):
-            prefix = pfx + " "
-            label = label[: -len(suffix)]
-            break
+            base = label[: -len(suffix)]
+            # Check if the base itself is in the override table
+            base_display = LABEL_TO_DISPLAY.get(base) or base.replace("-", " ").title()
+            return f"{prefix} {base_display}"
 
-    # Remove other form suffixes for display
-    for form in ("-zen", "-gmax", "-mega", "-primal"):
-        if label.endswith(form):
-            label = label[: -len(form)]
-            break
-
-    if label in NAME_FIXES:
-        base = NAME_FIXES[label]
-    else:
-        base = " ".join(p.capitalize() for p in label.split("-"))
-
-    return prefix + base
+    # Generic: replace hyphens, title case
+    return label.replace("-", " ").title()
 
 
 def normalize_query(name: str) -> str:
-    """Lowercase, strip spaces and convert ' to nothing for matching."""
-    return re.sub(r"['\s]", "", name.lower().replace("♀", "-f").replace("♂", "-m"))
+    return re.sub(r"[\s'\u2019\u2640\u2642]", "", name.lower())
 
 
 def label_matches_query(label: str, query: str) -> bool:
-    """Check if a model label matches a user-typed query."""
-    q = normalize_query(query)
-    lbl = normalize_query(label)
+    q    = normalize_query(query)
+    lbl  = normalize_query(label)
     disp = normalize_query(label_to_display(label))
-    return q == lbl or q == disp or lbl.startswith(q) or disp.startswith(q)
+    return q in (lbl, disp) or lbl.startswith(q) or disp.startswith(q)
+
+
+# ── DEFAULT RARE / REGIONAL LISTS ──────────────────────────────────────
+
+DEFAULT_RARES = {
+    "mewtwo","mew","lugia","ho-oh","celebi","kyogre","groudon","rayquaza",
+    "jirachi","deoxys","deoxys-normal","deoxys-attack","deoxys-defense","deoxys-speed",
+    "dialga","palkia","giratina","giratina-origin","dialga-origin","palkia-origin",
+    "arceus","victini","reshiram","zekrom","kyurem","kyurem-black","kyurem-white",
+    "keldeo","keldeo-resolute","meloetta","meloetta-pirouette","genesect",
+    "xerneas","yveltal","zygarde","zygarde-10","zygarde-complete",
+    "diancie","hoopa","hoopa-unbound","volcanion",
+    "cosmog","cosmoem","solgaleo","lunala","necrozma",
+    "necrozma-dusk-mane","necrozma-dawn-wings",
+    "magearna","marshadow","zeraora","meltan","melmetal",
+    "zacian","zacian-crowned","zamazenta","zamazenta-crowned",
+    "eternatus","kubfu","urshifu","urshifu-rapid-strike",
+    "zarude","zarude-dada","regieleki","regidrago",
+    "glastrier","spectrier","calyrex","calyrex-ice","calyrex-shadow",
+    "enamorus","enamorus-therian",
+    "koraidon","miraidon","wo-chien","chien-pao","ting-lu","chi-yu",
+    "iron-valiant","iron-leaves","walking-wake","gouging-fire","raging-bolt",
+    "iron-boulder","iron-crown","terapagos","terapagos-terastal","pecharunt",
+    "ursaluna-bloodmoon",
+}
+
+REGIONAL_SUFFIXES = ("-galar", "-alola", "-hisui", "-paldea")
 
 
 def is_rare(label: str, guild_id: int) -> bool:
@@ -230,10 +378,8 @@ def is_regional(label: str, guild_id: int) -> bool:
 MODEL_DIR   = Path(__file__).parent / "model"
 ONNX_PATH   = MODEL_DIR / "pokemon_cnn_v2.onnx"
 LABELS_PATH = MODEL_DIR / "labels_v2.json"
-
 MODEL_ONNX_URL   = "https://raw.githubusercontent.com/senko-sleep/Poketwo-AutoNamer/main/model/pokemon_cnn_v2.onnx"
 MODEL_LABELS_URL = "https://raw.githubusercontent.com/senko-sleep/Poketwo-AutoNamer/main/model/labels_v2.json"
-
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 CONFIDENCE_THRESHOLD = 0.40
@@ -260,7 +406,7 @@ def setup_classifier() -> None:
     try:
         _download_model()
     except Exception as exc:
-        log.error("Model download failed: %s — inference disabled", exc)
+        log.error("Model download failed: %s", exc)
         return
     if not ONNX_PATH.exists():
         return
@@ -270,9 +416,7 @@ def setup_classifier() -> None:
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 2
     opts.inter_op_num_threads = 1
-    ort_session = ort.InferenceSession(
-        str(ONNX_PATH), sess_options=opts, providers=["CPUExecutionProvider"]
-    )
+    ort_session = ort.InferenceSession(str(ONNX_PATH), sess_options=opts, providers=["CPUExecutionProvider"])
     log.info("ONNX model loaded: %d classes", len(class_names))
 
 
@@ -283,10 +427,9 @@ def _classify_sync(img_bytes: bytes) -> tuple[str | None, float]:
     arr = (np.asarray(img, dtype=np.float32) / 255.0 - MEAN) / STD
     inp = np.expand_dims(np.transpose(arr, (2, 0, 1)), 0)
     logits = ort_session.run(None, {ort_session.get_inputs()[0].name: inp})[0][0]
-    exp   = np.exp(logits - logits.max())
-    probs = exp / exp.sum()
-    idx   = int(np.argmax(probs))
-    return class_names[idx] if idx < len(class_names) else None, float(probs[idx])
+    exp = np.exp(logits - logits.max()); probs = exp / exp.sum()
+    idx = int(np.argmax(probs))
+    return (class_names[idx] if idx < len(class_names) else None), float(probs[idx])
 
 
 async def classify_async(img_bytes: bytes) -> tuple[str | None, float]:
@@ -306,24 +449,17 @@ def load_pokedex() -> None:
     if p.exists():
         with open(p) as f:
             POKEDEX = json.load(f)
-        log.info("Pokedex loaded: %d entries", len(POKEDEX))
 
 
 def _url_fast_path(url: str) -> str | None:
     m = CDN_PATTERN.search(url)
-    if m:
-        return POKEDEX.get(m.group(1))
-    return None
+    return POKEDEX.get(m.group(1)) if m else None
 
 
-async def identify_spawn(
-    session: aiohttp.ClientSession, image_url: str
-) -> tuple[str | None, str]:
-    """Returns (raw_label, method) or (None, '')."""
+async def identify_spawn(session: aiohttp.ClientSession, image_url: str) -> tuple[str | None, str]:
     name = _url_fast_path(image_url)
     if name:
         return name.lower(), "url"
-
     try:
         async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
             if r.status != 200:
@@ -332,12 +468,23 @@ async def identify_spawn(
     except Exception as exc:
         log.error("Image download error: %s", exc)
         return None, ""
-
     label, prob = await classify_async(img_bytes)
     log.info("ONNX → %s (%.1f%%)", label, prob * 100)
     if label and prob >= CONFIDENCE_THRESHOLD:
         return label, f"onnx/{prob*100:.0f}%"
     return None, ""
+
+
+async def identify_from_url_direct(session: aiohttp.ClientSession, image_url: str) -> tuple[str | None, float]:
+    """Used by admin identify command — returns (label, confidence)."""
+    try:
+        async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status != 200:
+                return None, 0.0
+            img_bytes = await r.read()
+    except Exception as exc:
+        return None, 0.0
+    return await classify_async(img_bytes)
 
 
 # ── HELPERS ─────────────────────────────────────────────────────────────
@@ -365,15 +512,11 @@ def is_spawn_message(msg: discord.Message) -> bool:
 
 
 def parse_role(guild: discord.Guild, arg: str) -> discord.Role | None:
-    """Accept @role mention or raw role ID."""
     m = re.search(r"\d{15,20}", arg)
-    if m:
-        return guild.get_role(int(m.group()))
-    return None
+    return guild.get_role(int(m.group())) if m else None
 
 
 def parse_user_id(arg: str) -> int | None:
-    """Extract user ID from mention or raw number."""
     m = re.search(r"\d{15,20}", arg)
     return int(m.group()) if m else None
 
@@ -387,14 +530,14 @@ def is_owner(user: discord.User | discord.Member) -> bool:
 
 
 def pokemon_list_from_args(text: str) -> list[str]:
-    """Parse comma/space-separated Pokemon names from user input."""
     return [p.strip().lower() for p in re.split(r"[,]+", text) if p.strip()]
 
 
-# ── CHANNEL / GUILD STATE ───────────────────────────────────────────────
+# ── CHANNEL STATE ───────────────────────────────────────────────────────
 
 channel_last_action: dict[int, float] = {}
 semaphore = asyncio.Semaphore(5)
+http_session: aiohttp.ClientSession | None = None
 
 
 def on_cooldown(channel_id: int) -> bool:
@@ -404,8 +547,6 @@ def on_cooldown(channel_id: int) -> bool:
 def update_cooldown(channel_id: int) -> None:
     channel_last_action[channel_id] = time.time()
 
-
-http_session: aiohttp.ClientSession | None = None
 
 # ── BOT ─────────────────────────────────────────────────────────────────
 
@@ -417,9 +558,10 @@ async def run_bot() -> None:
 
     @client.event
     async def on_ready() -> None:
-        log.info("Logged in as %s (%s) | Classifier: %s",
+        log.info("Logged in as %s (%s) | Classifier: %s | Watching: %s",
                  client.user, client.user.id if client.user else "?",
-                 "READY" if ort_session else "DISABLED")
+                 "READY" if ort_session else "DISABLED",
+                 WATCH_CHANNEL_IDS or "all channels")
 
     @client.event
     async def on_message(msg: discord.Message) -> None:
@@ -427,8 +569,8 @@ async def run_bot() -> None:
             return
         if msg.author.id == POKETWO_BOT_ID:
             await handle_spawn(msg)
-            return
-        await handle_command(msg, client)
+        else:
+            await handle_command(msg, client)
 
     await client.start(TOKEN)
 
@@ -438,160 +580,122 @@ async def run_bot() -> None:
 async def handle_command(msg: discord.Message, client: discord.Client) -> None:
     if not msg.guild:
         return
-
     content = msg.content.strip()
-
-    # Detect prefix: pk! or @mention
-    mention_prefix = f"<@{client.user.id}>" if client.user else None
-    mention_prefix2 = f"<@!{client.user.id}>" if client.user else None
-
+    uid_str = str(client.user.id) if client.user else ""
     if content.lower().startswith(PREFIX):
         cmd_body = content[len(PREFIX):].strip()
-    elif mention_prefix and content.startswith(mention_prefix):
-        cmd_body = content[len(mention_prefix):].strip()
-    elif mention_prefix2 and content.startswith(mention_prefix2):
-        cmd_body = content[len(mention_prefix2):].strip()
+    elif uid_str and (content.startswith(f"<@{uid_str}>") or content.startswith(f"<@!{uid_str}>")):
+        cmd_body = re.sub(rf"^<@!?{uid_str}>", "", content).strip()
     else:
         return
 
     parts = cmd_body.split(None, 1)
-    cmd   = parts[0].lower() if parts else ""
-    args  = parts[1].strip() if len(parts) > 1 else ""
+    cmd  = parts[0].lower() if parts else ""
+    args = parts[1].strip() if len(parts) > 1 else ""
 
-    # ── pk!ping / pk!help ─────────────────────────────────────────────
     if cmd in ("ping", "help"):
         await cmd_help(msg)
-
-    # ── pk!cl ─────────────────────────────────────────────────────────
     elif cmd == "cl":
         await cmd_collection(msg, args)
-
-    # ── pk!sh ─────────────────────────────────────────────────────────
     elif cmd == "sh":
         await cmd_shiny(msg, args)
-
-    # ── pk!settings ───────────────────────────────────────────────────
     elif cmd == "settings":
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
         await cmd_settings(msg, args)
-
-    # ── pk!rares ──────────────────────────────────────────────────────
     elif cmd == "rares":
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
         await cmd_rares(msg, args)
-
-    # ── pk!regionals ──────────────────────────────────────────────────
     elif cmd == "regionals":
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
         await cmd_regionals(msg, args)
-
-    # ── pk!channelsettings ────────────────────────────────────────────
     elif cmd == "channelsettings":
         if not is_admin(msg.author):
             return await msg.channel.send("❌ Administrator permission required.", delete_after=8)
         await cmd_channelsettings(msg, args)
-
-    # ── pk!admin ──────────────────────────────────────────────────────
     elif cmd == "admin":
         if not is_owner(msg.author):
             return await msg.channel.send("❌ Owner only.", delete_after=8)
-        await cmd_admin(msg, args)
-
-    # ── pk!debug ──────────────────────────────────────────────────────
+        await cmd_admin(msg, args, client)
     elif cmd == "debug":
         if not is_owner(msg.author):
             return await msg.channel.send("❌ Owner only.", delete_after=8)
         await cmd_debug(msg)
-
-    # ── pk!guess ──────────────────────────────────────────────────────
     elif cmd == "guess":
         await cmd_guess(msg)
-
-    # ── pk!correct ────────────────────────────────────────────────────
     elif cmd == "correct":
         log.info("USER CORRECTION: '%s'", args)
         await msg.channel.send(f"Got it! The correct Pokémon was **{args.title()}**.",
                                reference=msg, mention_author=False)
 
 
-# ── COMMANDS ─────────────────────────────────────────────────────────────
+# ── USER COMMANDS ─────────────────────────────────────────────────────────
 
 async def cmd_help(msg: discord.Message) -> None:
-    embed = discord.Embed(title="Pickel's Assistant — Help", color=0x5865F2)
-    embed.add_field(name="Identification", value=(
+    embed = discord.Embed(title="Pickel\u2019s Assistant \u2014 Commands", color=0x5865F2)
+    embed.add_field(name="\U0001f50d Identification", value=(
         "`pk!guess` — reply to a spawn to identify it\n"
-        "`pk!correct <name>` — report a wrong identification"
+        "`pk!correct <name>` — correct a wrong name"
     ), inline=False)
-    embed.add_field(name="Collection Pings", value=(
-        "`pk!cl add <pokemon, ...>` — add Pokémon to your list\n"
+    embed.add_field(name="\U0001f4e6 Collection Pings", value=(
+        "`pk!cl add <pokemon, ...>` — add to your list\n"
         "`pk!cl remove <pokemon, ...>` — remove from list\n"
-        "`pk!cl list` — view your collection list"
+        "`pk!cl list` — view your list"
     ), inline=False)
-    embed.add_field(name="Shiny Hunting", value=(
-        "`pk!sh <pokemon>` — set your shiny hunt target (1 at a time)\n"
+    embed.add_field(name="\u2728 Shiny Hunting", value=(
+        "`pk!sh <pokemon>` — set your hunt target (1 at a time)\n"
         "`pk!sh clear` — clear your hunt"
     ), inline=False)
-    embed.add_field(name="Admin — Server Settings", value=(
-        "`pk!settings rare-role @role` — set rare ping role\n"
-        "`pk!settings regional-role @role` — set regional ping role\n"
-        "`pk!rares <list>` — override rare Pokémon list\n"
-        "`pk!regionals <list>` — override regional Pokémon list\n"
+    embed.add_field(name="\u2699\ufe0f Admin — Server", value=(
+        "`pk!settings rare-role <@role/id>` — set rare ping role\n"
+        "`pk!settings regional-role <@role/id>` — set regional ping role\n"
+        "`pk!rares <list>` — override rare list (empty = reset to default)\n"
+        "`pk!regionals <list>` — override regional list\n"
         "`pk!channelsettings` — view/toggle channel features"
     ), inline=False)
+    embed.set_footer(text="Prefix: pk! or @mention the bot")
     await msg.channel.send(embed=embed)
 
 
 async def cmd_collection(msg: discord.Message, args: str) -> None:
-    uid = str(msg.author.id)
     sub_parts = args.split(None, 1)
     sub  = sub_parts[0].lower() if sub_parts else "list"
     rest = sub_parts[1].strip() if len(sub_parts) > 1 else ""
-
-    col = _user_col(msg.author.id)
+    col  = _user_col(msg.author.id)
 
     if sub == "add":
         if not rest:
             return await msg.channel.send("Usage: `pk!cl add <pokemon, ...>`")
-        added = []
-        for p in pokemon_list_from_args(rest):
-            if p and p not in col:
-                col.append(p)
-                added.append(p)
+        added = [p for p in pokemon_list_from_args(rest) if p and p not in col]
+        col.extend(added)
         _save()
         await msg.channel.send(
-            f"✅ Added to your collection: **{', '.join(t.title() for t in added)}**" if added
-            else "Those Pokémon are already in your collection.",
-            reference=msg, mention_author=False
-        )
+            f"✅ Added: **{', '.join(p.title() for p in added)}**" if added
+            else "Already in your list.",
+            reference=msg, mention_author=False)
 
     elif sub == "remove":
         if not rest:
             return await msg.channel.send("Usage: `pk!cl remove <pokemon, ...>`")
-        removed = []
-        for p in pokemon_list_from_args(rest):
-            if p in col:
-                col.remove(p)
-                removed.append(p)
+        removed = [p for p in pokemon_list_from_args(rest) if p in col]
+        for p in removed:
+            col.remove(p)
         _save()
         await msg.channel.send(
-            f"✅ Removed: **{', '.join(t.title() for t in removed)}**" if removed
-            else "None of those were in your collection.",
-            reference=msg, mention_author=False
-        )
+            f"✅ Removed: **{', '.join(p.title() for p in removed)}**" if removed
+            else "None of those were in your list.",
+            reference=msg, mention_author=False)
 
     elif sub == "list":
         if not col:
             return await msg.channel.send("Your collection list is empty. Use `pk!cl add <pokemon>`.")
         embed = discord.Embed(
             title=f"{msg.author.display_name}'s Collection Pings",
-            description=", ".join(p.title() for p in col),
-            color=0x57F287
-        )
+            description=", ".join(label_to_display(p) for p in col),
+            color=0x57F287)
         await msg.channel.send(embed=embed)
-
     else:
         await msg.channel.send("Usage: `pk!cl add/remove/list <pokemon>`")
 
@@ -602,65 +706,59 @@ async def cmd_shiny(msg: discord.Message, args: str) -> None:
         _data["user_shiny_hunts"].pop(uid, None)
         _save()
         return await msg.channel.send("✅ Shiny hunt cleared.", reference=msg, mention_author=False)
-
     pokemon = args.strip().lower()
-    prev = _data["user_shiny_hunts"].get(uid)
+    prev    = _data["user_shiny_hunts"].get(uid)
     _data["user_shiny_hunts"][uid] = pokemon
     _save()
-    msg_text = f"✅ Shiny hunt set to **{pokemon.title()}**!"
+    text = f"✅ Shiny hunt set to **{label_to_display(pokemon)}**!"
     if prev:
-        msg_text += f" (replaced **{prev.title()}**)"
-    await msg.channel.send(msg_text, reference=msg, mention_author=False)
+        text += f" (replaced **{label_to_display(prev)}**)"
+    await msg.channel.send(text, reference=msg, mention_author=False)
 
 
 async def cmd_settings(msg: discord.Message, args: str) -> None:
     parts = args.split(None, 1)
     if len(parts) < 2:
-        return await msg.channel.send("Usage: `pk!settings rare-role @role` or `pk!settings regional-role @role`")
+        return await msg.channel.send("Usage: `pk!settings rare-role <@role/id>` or `pk!settings regional-role <@role/id>`")
     key, value = parts[0].lower(), parts[1].strip()
     cfg = _guild_cfg(msg.guild.id)
-
     if key in ("rare-role", "regional-role"):
         role = parse_role(msg.guild, value)
         if not role:
-            return await msg.channel.send("❌ Role not found. Use a mention or role ID.")
+            return await msg.channel.send("❌ Role not found. Mention the role or paste its ID.")
         field = "rare_role" if key == "rare-role" else "regional_role"
         cfg[field] = str(role.id)
         _save()
         label = "Rare" if key == "rare-role" else "Regional"
-        await msg.channel.send(f"✅ {label} ping role set to {role.mention}.", reference=msg, mention_author=False)
+        await msg.channel.send(f"✅ **{label}** ping role set to {role.mention}.", reference=msg, mention_author=False)
     else:
-        await msg.channel.send("Unknown setting. Available: `rare-role`, `regional-role`")
+        await msg.channel.send("Available settings: `rare-role`, `regional-role`")
 
 
 async def cmd_rares(msg: discord.Message, args: str) -> None:
     if not args:
-        cfg = _guild_cfg(msg.guild.id)
-        cfg["rare_pokemon"] = []
+        _guild_cfg(msg.guild.id)["rare_pokemon"] = []
         _save()
-        return await msg.channel.send("✅ Rare list reset to defaults.")
+        return await msg.channel.send("✅ Rare list reset to built-in defaults.")
     names = pokemon_list_from_args(args)
     _guild_cfg(msg.guild.id)["rare_pokemon"] = names
     _save()
     await msg.channel.send(
-        f"✅ Rare Pokémon list set to: **{', '.join(n.title() for n in names)}**",
-        reference=msg, mention_author=False
-    )
+        f"✅ Rare list set ({len(names)} Pokémon): **{', '.join(label_to_display(n) for n in names)}**",
+        reference=msg, mention_author=False)
 
 
 async def cmd_regionals(msg: discord.Message, args: str) -> None:
     if not args:
-        cfg = _guild_cfg(msg.guild.id)
-        cfg["regional_pokemon"] = []
+        _guild_cfg(msg.guild.id)["regional_pokemon"] = []
         _save()
-        return await msg.channel.send("✅ Regional list reset to defaults (auto-detect by form).")
+        return await msg.channel.send("✅ Regional list reset to built-in defaults (auto-detects by form suffix).")
     names = pokemon_list_from_args(args)
     _guild_cfg(msg.guild.id)["regional_pokemon"] = names
     _save()
     await msg.channel.send(
-        f"✅ Regional Pokémon list set to: **{', '.join(n.title() for n in names)}**",
-        reference=msg, mention_author=False
-    )
+        f"✅ Regional list set ({len(names)} Pokémon): **{', '.join(label_to_display(n) for n in names)}**",
+        reference=msg, mention_author=False)
 
 
 CHANNEL_TOGGLES = {
@@ -673,110 +771,25 @@ CHANNEL_TOGGLES = {
 
 
 async def cmd_channelsettings(msg: discord.Message, args: str) -> None:
-    ch   = msg.channel
-    cfg  = _ch_cfg(ch.id)
+    cfg   = _ch_cfg(msg.channel.id)
     parts = args.split()
-
     if not args:
-        embed = discord.Embed(
-            title=f"#{ch.name} — Channel Settings",
-            color=0xFEE75C
-        )
+        embed = discord.Embed(title=f"#{msg.channel.name} — Channel Settings", color=0xFEE75C)
         for key, label in CHANNEL_TOGGLES.items():
-            val = cfg.get(key, True)
-            embed.add_field(name=label, value="🟢 On" if val else "🔴 Off", inline=True)
-        embed.set_footer(text="Toggle with: pk!channelsettings <setting> true/false")
+            embed.add_field(name=label, value="🟢 On" if cfg.get(key, True) else "🔴 Off", inline=True)
+        embed.set_footer(text="Toggle: pk!channelsettings <setting> true/false")
         return await msg.channel.send(embed=embed)
-
     if len(parts) < 2:
-        opts = " | ".join(CHANNEL_TOGGLES.keys())
-        return await msg.channel.send(f"Usage: `pk!channelsettings <{opts}> true/false`")
-
+        return await msg.channel.send(f"Usage: `pk!channelsettings <{'|'.join(CHANNEL_TOGGLES)}> true/false`")
     key, val_str = parts[0].lower(), parts[1].lower()
     if key not in CHANNEL_TOGGLES:
-        return await msg.channel.send(f"Unknown setting. Options: {', '.join(CHANNEL_TOGGLES.keys())}")
-    if val_str not in ("true", "false", "on", "off", "1", "0", "yes", "no"):
-        return await msg.channel.send("Value must be `true` or `false`.")
-
+        return await msg.channel.send(f"Unknown setting. Options: {', '.join(CHANNEL_TOGGLES)}")
     enabled = val_str in ("true", "on", "1", "yes")
     cfg[key] = enabled
     _save()
-    label = CHANNEL_TOGGLES[key]
     await msg.channel.send(
-        f"{'🟢' if enabled else '🔴'} **{label}** is now {'on' if enabled else 'off'} in this channel.",
-        reference=msg, mention_author=False
-    )
-
-
-async def cmd_admin(msg: discord.Message, args: str) -> None:
-    parts = args.split()
-    if len(parts) < 3 or parts[0].lower() != "view":
-        return await msg.channel.send(
-            "Usage:\n"
-            "`pk!admin view cl @user/id` — view collection list\n"
-            "`pk!admin view sh @user/id` — view shiny hunt\n"
-            "`pk!admin view stats` — overall stats"
-        )
-
-    sub  = parts[1].lower()
-    rest = " ".join(parts[2:])
-
-    if sub == "stats":
-        cols  = sum(len(v) for v in _data["user_collections"].values())
-        hunts = len(_data["user_shiny_hunts"])
-        guilds = len(_data["guild_settings"])
-        await msg.channel.send(
-            f"**Bot Stats**\nUsers with collections: {len(_data['user_collections'])}\n"
-            f"Total collection entries: {cols}\nActive shiny hunts: {hunts}\nConfigured guilds: {guilds}"
-        )
-        return
-
-    uid = parse_user_id(rest)
-    if not uid:
-        return await msg.channel.send("❌ Couldn't parse user ID.")
-
-    if sub == "cl":
-        col = _data["user_collections"].get(str(uid), [])
-        if not col:
-            return await msg.channel.send(f"User `{uid}` has no collection pings set.")
-        embed = discord.Embed(
-            title=f"Collection list for {uid}",
-            description=", ".join(p.title() for p in col),
-            color=0x57F287
-        )
-        await msg.channel.send(embed=embed)
-
-    elif sub == "sh":
-        hunt = _data["user_shiny_hunts"].get(str(uid))
-        if not hunt:
-            return await msg.channel.send(f"User `{uid}` has no active shiny hunt.")
-        await msg.channel.send(f"User `{uid}` is hunting: **{hunt.title()}**")
-
-    else:
-        await msg.channel.send("Unknown subcommand. Use `cl` or `sh`.")
-
-
-async def cmd_debug(msg: discord.Message) -> None:
-    ref = msg.reference
-    if not ref:
-        return await msg.channel.send("Reply to a spawn message with `pk!debug`.")
-    try:
-        target = (
-            ref.resolved if isinstance(ref.resolved, discord.Message)
-            else await msg.channel.fetch_message(ref.message_id)
-        )
-    except Exception as exc:
-        return await msg.channel.send(f"Couldn't fetch: {exc}")
-    lines = [f"Author: {target.author} ({target.author.id})", f"Embeds: {len(target.embeds)}"]
-    for i, emb in enumerate(target.embeds):
-        lines += [
-            f"[{i}] title={emb.title!r}",
-            f"[{i}] description={str(emb.description or '')[:80]!r}",
-            f"[{i}] image={emb.image.url if emb.image else None}",
-            f"[{i}] thumbnail={emb.thumbnail.url if emb.thumbnail else None}",
-        ]
-    log.info("DEBUG:\n%s", "\n".join(lines))
-    await msg.channel.send("```\n" + "\n".join(lines) + "\n```")
+        f"{'🟢' if enabled else '🔴'} **{CHANNEL_TOGGLES[key]}** is now **{'on' if enabled else 'off'}** in this channel.",
+        reference=msg, mention_author=False)
 
 
 async def cmd_guess(msg: discord.Message) -> None:
@@ -784,56 +797,352 @@ async def cmd_guess(msg: discord.Message) -> None:
     if not ref:
         return await msg.channel.send("Reply to a Poketwo spawn with `pk!guess`.")
     try:
-        target = (
-            ref.resolved if isinstance(ref.resolved, discord.Message)
-            else await msg.channel.fetch_message(ref.message_id)
-        )
+        target = ref.resolved if isinstance(ref.resolved, discord.Message) \
+                 else await msg.channel.fetch_message(ref.message_id)
     except Exception as exc:
         return await msg.channel.send(f"Couldn't fetch that message: {exc}")
-
     image_url = get_spawn_image_url(target)
     if not image_url:
         return await msg.channel.send("No image found in that message.")
-
     assert http_session is not None
     label, method = await identify_spawn(http_session, image_url)
     if label:
-        display = label_to_display(label)
-        log.info("!guess → %s (%s)", display, method)
-        await msg.channel.send(f"That's **{display}**!", reference=msg, mention_author=False)
+        await msg.channel.send(f"That's **{label_to_display(label)}**!", reference=msg, mention_author=False)
     else:
-        await msg.channel.send(
-            "Couldn't identify that one. Use `pk!correct <name>` if you know.",
-            reference=msg, mention_author=False
-        )
+        await msg.channel.send("Couldn't identify that one. Use `pk!correct <name>` if you know.",
+                               reference=msg, mention_author=False)
+
+
+async def cmd_debug(msg: discord.Message) -> None:
+    ref = msg.reference
+    if not ref:
+        return await msg.channel.send("Reply to a spawn message with `pk!debug`.")
+    try:
+        target = ref.resolved if isinstance(ref.resolved, discord.Message) \
+                 else await msg.channel.fetch_message(ref.message_id)
+    except Exception as exc:
+        return await msg.channel.send(f"Couldn't fetch: {exc}")
+    lines = [f"Author: {target.author} ({target.author.id})", f"Embeds: {len(target.embeds)}"]
+    for i, emb in enumerate(target.embeds):
+        lines += [
+            f"[{i}] title={emb.title!r}",
+            f"[{i}] desc={str(emb.description or '')[:80]!r}",
+            f"[{i}] image={emb.image.url if emb.image else None}",
+            f"[{i}] thumbnail={emb.thumbnail.url if emb.thumbnail else None}",
+        ]
+    log.info("DEBUG:\n%s", "\n".join(lines))
+    await msg.channel.send("```\n" + "\n".join(lines) + "\n```")
+
+
+# ── OWNER / ADMIN COMMANDS ────────────────────────────────────────────────
+
+ADMIN_HELP = """
+**pk!admin** — Owner-only management commands
+
+**Viewing data**
+`pk!admin stats` — bot-wide statistics
+`pk!admin view cl @user/id` — user's collection list
+`pk!admin view sh @user/id` — user's shiny hunt
+`pk!admin listhunts` — all active shiny hunts
+`pk!admin listcols` — all users with collection pings
+`pk!admin guildsettings` — this guild's rare/regional config
+`pk!admin channelinfo [#ch/id]` — channel toggle states
+`pk!admin logs` — last 20 spawn identifications
+
+**Editing user data**
+`pk!admin addcol @user/id <pokemon, ...>` — add to user's collection
+`pk!admin removecol @user/id <pokemon>` — remove from user's collection
+`pk!admin clearcol @user/id` — clear user's collection
+`pk!admin setsh @user/id <pokemon>` — set user's shiny hunt
+`pk!admin clearsh @user/id` — clear user's shiny hunt
+
+**Server management**
+`pk!admin resetguild` — reset this guild's settings
+`pk!admin resetchannel [#ch/id]` — reset a channel's settings
+`pk!admin cooldown clear` — clear all channel cooldowns
+
+**Testing & tools**
+`pk!admin identify <url>` — identify a Pokémon from an image URL
+`pk!admin testspawn <pokemon>` — preview what the bot would post
+`pk!admin backup` — DM you the full data file
+""".strip()
+
+
+async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> None:
+    parts = args.split(None, 2)
+    sub   = parts[0].lower() if parts else "help"
+
+    # ── help ──────────────────────────────────────────────────────────
+    if sub == "help" or not sub:
+        embed = discord.Embed(title="Admin Commands", description=ADMIN_HELP, color=0xED4245)
+        await msg.channel.send(embed=embed)
+
+    # ── stats ─────────────────────────────────────────────────────────
+    elif sub == "stats":
+        total_col_entries = sum(len(v) for v in _data["user_collections"].values())
+        users_with_col    = sum(1 for v in _data["user_collections"].values() if v)
+        embed = discord.Embed(title="Bot Statistics", color=0x5865F2)
+        embed.add_field(name="Model", value="READY ✅" if ort_session else "DISABLED ❌")
+        embed.add_field(name="Collection users", value=str(users_with_col))
+        embed.add_field(name="Collection entries", value=str(total_col_entries))
+        embed.add_field(name="Active shiny hunts", value=str(len(_data["user_shiny_hunts"])))
+        embed.add_field(name="Configured guilds", value=str(len(_data["guild_settings"])))
+        embed.add_field(name="Channel cooldowns", value=str(len(channel_last_action)))
+        embed.add_field(name="Spawn IDs logged", value=str(len(recent_ids)))
+        embed.add_field(name="Watching channels", value=str(WATCH_CHANNEL_IDS) if WATCH_CHANNEL_IDS else "All")
+        await msg.channel.send(embed=embed)
+
+    # ── view cl / sh ──────────────────────────────────────────────────
+    elif sub == "view":
+        if len(parts) < 3:
+            return await msg.channel.send("Usage: `pk!admin view cl/sh @user/id`")
+        what = parts[1].lower()
+        uid  = parse_user_id(parts[2])
+        if not uid:
+            return await msg.channel.send("❌ Couldn't parse user ID.")
+        if what == "cl":
+            col = _data["user_collections"].get(str(uid), [])
+            if not col:
+                return await msg.channel.send(f"`{uid}` has no collection list.")
+            embed = discord.Embed(title=f"Collection — {uid}", color=0x57F287,
+                                  description=", ".join(label_to_display(p) for p in col))
+            await msg.channel.send(embed=embed)
+        elif what == "sh":
+            hunt = _data["user_shiny_hunts"].get(str(uid))
+            if not hunt:
+                return await msg.channel.send(f"`{uid}` has no active shiny hunt.")
+            await msg.channel.send(f"**{uid}** is hunting: **{label_to_display(hunt)}**")
+        else:
+            await msg.channel.send("Use `cl` or `sh`.")
+
+    # ── listhunts ─────────────────────────────────────────────────────
+    elif sub == "listhunts":
+        hunts = _data["user_shiny_hunts"]
+        if not hunts:
+            return await msg.channel.send("No active shiny hunts.")
+        lines = [f"<@{uid}> → **{label_to_display(p)}**" for uid, p in list(hunts.items())[:20]]
+        embed = discord.Embed(title=f"Active Shiny Hunts ({len(hunts)})", description="\n".join(lines), color=0xFEE75C)
+        if len(hunts) > 20:
+            embed.set_footer(text=f"Showing 20/{len(hunts)}")
+        await msg.channel.send(embed=embed)
+
+    # ── listcols ──────────────────────────────────────────────────────
+    elif sub == "listcols":
+        active = {uid: col for uid, col in _data["user_collections"].items() if col}
+        if not active:
+            return await msg.channel.send("No collection lists set up.")
+        lines = [f"<@{uid}>: {', '.join(label_to_display(p) for p in col[:5])}"
+                 + (f" +{len(col)-5} more" if len(col) > 5 else "")
+                 for uid, col in list(active.items())[:15]]
+        embed = discord.Embed(title=f"Collection Lists ({len(active)} users)",
+                              description="\n".join(lines), color=0x57F287)
+        await msg.channel.send(embed=embed)
+
+    # ── guildsettings ─────────────────────────────────────────────────
+    elif sub == "guildsettings":
+        cfg = _data["guild_settings"].get(str(msg.guild.id), {})
+        rr  = cfg.get("rare_role")
+        rer = cfg.get("regional_role")
+        rp  = cfg.get("rare_pokemon", [])
+        rep = cfg.get("regional_pokemon", [])
+        embed = discord.Embed(title="Guild Settings", color=0xEB459E)
+        embed.add_field(name="Rare role",     value=f"<@&{rr}>" if rr else "Not set")
+        embed.add_field(name="Regional role", value=f"<@&{rer}>" if rer else "Not set")
+        embed.add_field(name="Custom rares",  value=", ".join(label_to_display(p) for p in rp) or "Using defaults", inline=False)
+        embed.add_field(name="Custom regionals", value=", ".join(label_to_display(p) for p in rep) or "Using defaults (form suffix)", inline=False)
+        await msg.channel.send(embed=embed)
+
+    # ── channelinfo ───────────────────────────────────────────────────
+    elif sub == "channelinfo":
+        ch_id = msg.channel.id
+        if len(parts) >= 3:
+            uid2 = parse_user_id(parts[2])
+            if uid2:
+                ch_id = uid2
+        cfg = _ch_cfg(ch_id)
+        embed = discord.Embed(title=f"Channel Settings — <#{ch_id}>", color=0xFEE75C)
+        for key, label in CHANNEL_TOGGLES.items():
+            embed.add_field(name=label, value="🟢 On" if cfg.get(key, True) else "🔴 Off", inline=True)
+        await msg.channel.send(embed=embed)
+
+    # ── logs ──────────────────────────────────────────────────────────
+    elif sub == "logs":
+        if not recent_ids:
+            return await msg.channel.send("No spawn identifications logged yet.")
+        lines = []
+        for ts, label, display, ch_id, method in list(recent_ids)[-20:][::-1]:
+            t = time.strftime("%H:%M:%S", time.gmtime(ts))
+            lines.append(f"`{t}` **{display}** in <#{ch_id}> ({method})")
+        embed = discord.Embed(title="Recent Spawn IDs", description="\n".join(lines), color=0x99AAB5)
+        await msg.channel.send(embed=embed)
+
+    # ── addcol ────────────────────────────────────────────────────────
+    elif sub == "addcol":
+        if len(parts) < 3:
+            return await msg.channel.send("Usage: `pk!admin addcol @user/id <pokemon, ...>`")
+        uid = parse_user_id(parts[1])
+        if not uid:
+            return await msg.channel.send("❌ Couldn't parse user ID.")
+        col   = _user_col(uid)
+        names = pokemon_list_from_args(parts[2])
+        added = [p for p in names if p not in col]
+        col.extend(added)
+        _save()
+        await msg.channel.send(f"✅ Added **{', '.join(label_to_display(p) for p in added)}** to `{uid}`'s list.")
+
+    # ── removecol ─────────────────────────────────────────────────────
+    elif sub == "removecol":
+        if len(parts) < 3:
+            return await msg.channel.send("Usage: `pk!admin removecol @user/id <pokemon>`")
+        uid = parse_user_id(parts[1])
+        if not uid:
+            return await msg.channel.send("❌ Couldn't parse user ID.")
+        col  = _user_col(uid)
+        name = parts[2].strip().lower()
+        if name in col:
+            col.remove(name)
+            _save()
+            await msg.channel.send(f"✅ Removed **{label_to_display(name)}** from `{uid}`'s list.")
+        else:
+            await msg.channel.send(f"That Pokémon isn't in `{uid}`'s list.")
+
+    # ── clearcol ──────────────────────────────────────────────────────
+    elif sub == "clearcol":
+        uid = parse_user_id(parts[1]) if len(parts) > 1 else None
+        if not uid:
+            return await msg.channel.send("Usage: `pk!admin clearcol @user/id`")
+        _data["user_collections"].pop(str(uid), None)
+        _save()
+        await msg.channel.send(f"✅ Cleared collection for `{uid}`.")
+
+    # ── setsh ─────────────────────────────────────────────────────────
+    elif sub == "setsh":
+        if len(parts) < 3:
+            return await msg.channel.send("Usage: `pk!admin setsh @user/id <pokemon>`")
+        uid = parse_user_id(parts[1])
+        if not uid:
+            return await msg.channel.send("❌ Couldn't parse user ID.")
+        pokemon = parts[2].strip().lower()
+        _data["user_shiny_hunts"][str(uid)] = pokemon
+        _save()
+        await msg.channel.send(f"✅ Set `{uid}`'s shiny hunt to **{label_to_display(pokemon)}**.")
+
+    # ── clearsh ───────────────────────────────────────────────────────
+    elif sub == "clearsh":
+        uid = parse_user_id(parts[1]) if len(parts) > 1 else None
+        if not uid:
+            return await msg.channel.send("Usage: `pk!admin clearsh @user/id`")
+        _data["user_shiny_hunts"].pop(str(uid), None)
+        _save()
+        await msg.channel.send(f"✅ Cleared shiny hunt for `{uid}`.")
+
+    # ── resetguild ────────────────────────────────────────────────────
+    elif sub == "resetguild":
+        _data["guild_settings"].pop(str(msg.guild.id), None)
+        _save()
+        await msg.channel.send("✅ Guild settings reset to defaults.")
+
+    # ── resetchannel ──────────────────────────────────────────────────
+    elif sub == "resetchannel":
+        ch_id = msg.channel.id
+        if len(parts) >= 2:
+            uid2 = parse_user_id(parts[1])
+            if uid2:
+                ch_id = uid2
+        _data["channel_settings"].pop(str(ch_id), None)
+        _save()
+        await msg.channel.send(f"✅ Channel settings reset for <#{ch_id}>.")
+
+    # ── cooldown clear ────────────────────────────────────────────────
+    elif sub == "cooldown":
+        if len(parts) > 1 and parts[1].lower() == "clear":
+            channel_last_action.clear()
+            await msg.channel.send("✅ All channel cooldowns cleared.")
+        else:
+            now = time.time()
+            lines = [f"<#{ch}>: {int(COOLDOWN - (now - ts))}s left"
+                     for ch, ts in channel_last_action.items() if now - ts < COOLDOWN]
+            await msg.channel.send("\n".join(lines) or "No active cooldowns.")
+
+    # ── identify ──────────────────────────────────────────────────────
+    elif sub == "identify":
+        url = parts[1].strip() if len(parts) > 1 else ""
+        if not url:
+            return await msg.channel.send("Usage: `pk!admin identify <image_url>`")
+        assert http_session is not None
+        async with msg.channel.typing():
+            label, prob = await identify_from_url_direct(http_session, url)
+        if label:
+            display = label_to_display(label)
+            await msg.channel.send(f"**{display}** (confidence: {prob*100:.1f}%)\nRaw label: `{label}`")
+        else:
+            await msg.channel.send("❌ Could not identify the Pokémon from that URL.")
+
+    # ── testspawn ─────────────────────────────────────────────────────
+    elif sub == "testspawn":
+        pokemon = parts[1].strip().lower() if len(parts) > 1 else ""
+        if not pokemon:
+            return await msg.channel.send("Usage: `pk!admin testspawn <pokemon>`")
+        display  = label_to_display(pokemon)
+        gid      = msg.guild.id
+        cfg_g    = _guild_cfg(gid)
+        ch_cfg   = _ch_cfg(msg.channel.id)
+        lines    = [f"That's **{display}**!"]
+
+        if ch_cfg.get("rareping", True) and is_rare(pokemon, gid):
+            rid  = cfg_g.get("rare_role")
+            lines.append(f"🌟 Rare: {f'<@&{rid}>' if rid else '*(rare role not set)*'}")
+
+        if ch_cfg.get("regionalpinging", True) and is_regional(pokemon, gid):
+            rid  = cfg_g.get("regional_role")
+            lines.append(f"🗺️ Regional: {f'<@&{rid}>' if rid else '*(regional role not set)*'}")
+
+        hunters = [uid for uid, h in _data["user_shiny_hunts"].items()
+                   if label_matches_query(pokemon, h)]
+        if ch_cfg.get("shinyhunt", True) and hunters:
+            lines.append(f"✨ Shiny hunt pings: {' '.join(f'<@{u}>' for u in hunters)}")
+
+        collectors = [uid for uid, col in _data["user_collections"].items()
+                      if any(label_matches_query(pokemon, p) for p in col)]
+        if ch_cfg.get("collectionping", True) and collectors:
+            lines.append(f"📦 Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
+
+        embed = discord.Embed(title="Test Spawn Preview", description="\n".join(lines), color=0xFEE75C)
+        embed.set_footer(text=f"Label: {pokemon} | Rare: {is_rare(pokemon, gid)} | Regional: {is_regional(pokemon, gid)}")
+        await msg.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    # ── backup ────────────────────────────────────────────────────────
+    elif sub == "backup":
+        if not DATA_PATH.exists():
+            return await msg.channel.send("No data file yet.")
+        try:
+            await msg.author.send(
+                "Here's your bot data backup:",
+                file=discord.File(str(DATA_PATH), filename="bot_data_backup.json")
+            )
+            await msg.channel.send("✅ Sent the data file to your DMs.")
+        except discord.Forbidden:
+            await msg.channel.send("❌ Couldn't DM you. Enable DMs from server members.")
+
+    else:
+        embed = discord.Embed(title="Admin Commands", description=ADMIN_HELP, color=0xED4245)
+        await msg.channel.send(embed=embed)
 
 
 # ── SPAWN HANDLER ─────────────────────────────────────────────────────────
 
 async def handle_spawn(msg: discord.Message) -> None:
-    if not is_spawn_message(msg):
-        return
-    if not msg.guild:
+    if not is_spawn_message(msg) or not msg.guild:
         return
     if WATCH_CHANNEL_IDS and msg.channel.id not in WATCH_CHANNEL_IDS:
         return
 
     ch_cfg = _ch_cfg(msg.channel.id)
-
-    # Check if anything at all is enabled in this channel
-    anything_on = (
-        ch_cfg.get("naming", True) or
-        ch_cfg.get("rareping", True) or
-        ch_cfg.get("regionalpinging", True) or
-        ch_cfg.get("shinyhunt", True) or
-        ch_cfg.get("collectionping", True)
-    )
-    if not anything_on:
+    if not any(ch_cfg.get(k, True) for k in CHANNEL_TOGGLES):
         return
 
     async with semaphore:
         if on_cooldown(msg.channel.id):
-            log.info("Cooldown — skipping channel %s", msg.channel.id)
             return
 
         image_url = get_spawn_image_url(msg)
@@ -846,52 +1155,41 @@ async def handle_spawn(msg: discord.Message) -> None:
             log.warning("Could not identify spawn in #%s", msg.channel.id)
             return
 
-        display = label_to_display(label)
-        log.info("Spawn identified: %s via %s", display, method)
+        display  = label_to_display(label)
+        guild_id = msg.guild.id
 
-        # Build response
+        # Log to recent_ids
+        recent_ids.append((time.time(), label, display, msg.channel.id, method))
+        log.info("Spawn → %s (%s)", display, method)
+
         lines: list[str] = []
 
         if ch_cfg.get("naming", True):
             lines.append(f"That's **{display}**!")
 
-        guild_id = msg.guild.id
-
-        # Rare ping
         if ch_cfg.get("rareping", True) and is_rare(label, guild_id):
-            cfg    = _guild_cfg(guild_id)
-            rid    = cfg.get("rare_role")
+            rid  = _guild_cfg(guild_id).get("rare_role")
             if rid:
                 role = msg.guild.get_role(int(rid))
                 lines.append(f"🌟 Rare: {role.mention if role else f'<@&{rid}>'}")
 
-        # Regional ping
         if ch_cfg.get("regionalpinging", True) and is_regional(label, guild_id):
-            cfg = _guild_cfg(guild_id)
-            rid = cfg.get("regional_role")
+            rid  = _guild_cfg(guild_id).get("regional_role")
             if rid:
                 role = msg.guild.get_role(int(rid))
                 lines.append(f"🗺️ Regional: {role.mention if role else f'<@&{rid}>'}")
 
-        # Shiny hunt pings
         if ch_cfg.get("shinyhunt", True):
-            hunters = [
-                uid for uid, hunt in _data["user_shiny_hunts"].items()
-                if label_matches_query(label, hunt)
-            ]
+            hunters = [uid for uid, h in _data["user_shiny_hunts"].items()
+                       if label_matches_query(label, h)]
             if hunters:
-                mentions = " ".join(f"<@{uid}>" for uid in hunters)
-                lines.append(f"✨ Shiny hunt pings: {mentions}")
+                lines.append(f"✨ Shiny hunt pings: {' '.join(f'<@{u}>' for u in hunters)}")
 
-        # Collection pings
         if ch_cfg.get("collectionping", True):
-            collectors = [
-                uid for uid, col in _data["user_collections"].items()
-                if any(label_matches_query(label, p) for p in col)
-            ]
+            collectors = [uid for uid, col in _data["user_collections"].items()
+                          if any(label_matches_query(label, p) for p in col)]
             if collectors:
-                mentions = " ".join(f"<@{uid}>" for uid in collectors)
-                lines.append(f"📦 Collection pings: {mentions}")
+                lines.append(f"📦 Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
 
         if not lines:
             return
@@ -936,13 +1234,10 @@ async def main() -> None:
     _load()
     setup_classifier()
     load_pokedex()
-
-    connector = aiohttp.TCPConnector(limit=20)
+    connector  = aiohttp.TCPConnector(limit=20)
     http_session = aiohttp.ClientSession(connector=connector)
-
     await start_web()
     await asyncio.sleep(2)
-
     log.info("Starting Discord bot…")
     try:
         await run_bot()
