@@ -668,13 +668,31 @@ async def cmd_collection(msg: discord.Message, args: str) -> None:
     if sub == "add":
         if not rest:
             return await msg.channel.send("Usage: `pk!cl add <pokemon, ...>`")
-        added = [p for p in pokemon_list_from_args(rest) if p and p not in col]
-        col.extend(added)
+        added = []
+        invalid = []
+        already = []
+        for p in pokemon_list_from_args(rest):
+            if not p:
+                continue
+            # Check against known model labels
+            matched = next((lbl for lbl in class_names if label_matches_query(lbl, p)), None)
+            if matched is None:
+                invalid.append(p)
+            elif matched in col:
+                already.append(matched)
+            else:
+                col.append(matched)
+                added.append(matched)
         _save()
-        await msg.channel.send(
-            f"✅ Added: **{', '.join(p.title() for p in added)}**" if added
-            else "Already in your list.",
-            reference=msg, mention_author=False)
+        lines = []
+        if added:
+            lines.append(f"✅ Added: **{', '.join(label_to_display(p) for p in added)}**")
+        if already:
+            lines.append(f"Already in your list: {', '.join(label_to_display(p) for p in already)}")
+        if invalid:
+            lines.append("\n".join(f"Invalid Pokémon: **{p.title()}**" for p in invalid))
+        await msg.channel.send("\n".join(lines) if lines else "Nothing changed.",
+                               reference=msg, mention_author=False)
 
     elif sub == "remove":
         if not rest:
@@ -1105,7 +1123,7 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
         collectors = [uid for uid, col in _data["user_collections"].items()
                       if any(label_matches_query(pokemon, p) for p in col)]
         if ch_cfg.get("collectionping", True) and collectors:
-            lines.append(f"📦 Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
+            lines.append(f"Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
 
         embed = discord.Embed(title="Test Spawn Preview", description="\n".join(lines), color=0xFEE75C)
         embed.set_footer(text=f"Label: {pokemon} | Rare: {is_rare(pokemon, gid)} | Regional: {is_regional(pokemon, gid)}")
@@ -1189,7 +1207,7 @@ async def handle_spawn(msg: discord.Message) -> None:
             collectors = [uid for uid, col in _data["user_collections"].items()
                           if any(label_matches_query(label, p) for p in col)]
             if collectors:
-                lines.append(f"📦 Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
+                lines.append(f"Collection pings: {' '.join(f'<@{u}>' for u in collectors)}")
 
         if not lines:
             return
