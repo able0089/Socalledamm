@@ -40,8 +40,8 @@ POKETWO_BOT_ID = int(os.environ.get("POKETWO_BOT_ID", "716390085896962058"))
 _raw = os.environ.get("WATCH_CHANNEL_IDS", "")
 WATCH_CHANNEL_IDS = {int(x.strip()) for x in _raw.split(",") if x.strip()}
 
-DELAY_MIN = float(os.environ.get("DELAY_MIN", "1.5"))
-DELAY_MAX = float(os.environ.get("DELAY_MAX", "3.0"))
+DELAY_MIN = float(os.environ.get("DELAY_MIN", "0.3"))
+DELAY_MAX = float(os.environ.get("DELAY_MAX", "0.8"))
 COOLDOWN  = float(os.environ.get("COOLDOWN",  "2.0"))
 
 PREFIX = "pk!"
@@ -316,11 +316,11 @@ def label_to_display(label: str) -> str:
             return f"{prefix} {base_display}"
 
     # Generic: replace hyphens, title case
-    return label.replace("-", " ").title()
+    return label.replace("-", " ").replace("_", " ").title()
 
 
 def normalize_query(name: str) -> str:
-    return re.sub(r"[\s'\u2019\u2640\u2642]", "", name.lower())
+    return re.sub(r"[\s_\-'\u2019\u2640\u2642]", "", name.lower())
 
 
 def label_matches_query(label: str, query: str) -> bool:
@@ -354,7 +354,7 @@ DEFAULT_RARES: set[str] = {
     "keldeo","keldeo-resolute","meloetta","meloetta-pirouette",
     "genesect","high-speed_flight_configuration_genesect",
     # Gen 6
-    "xerneas","yveltal",
+    "xerneas","xerneas-neutral","xerneas-active","yveltal",
     "zygarde","zygarde-10","zygarde-complete","zygarde-cell","zygarde-core",
     "diancie","hoopa","hoopa-unbound","volcanion",
     # Gen 7
@@ -408,7 +408,7 @@ DEFAULT_REGIONALS: set[str] = {
 
 
 def is_rare(label: str, _guild_id: int = 0) -> bool:
-    return label.lower() in DEFAULT_RARES
+    return label.lower().replace("_", "-") in DEFAULT_RARES
 
 
 def is_regional(label: str, _guild_id: int = 0) -> bool:
