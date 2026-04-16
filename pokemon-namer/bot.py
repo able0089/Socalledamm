@@ -40,9 +40,10 @@ POKETWO_BOT_ID = int(os.environ.get("POKETWO_BOT_ID", "716390085896962058"))
 _raw = os.environ.get("WATCH_CHANNEL_IDS", "")
 WATCH_CHANNEL_IDS = {int(x.strip()) for x in _raw.split(",") if x.strip()}
 
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0") or "0")
 DELAY_MIN = float(os.environ.get("DELAY_MIN", "0.3"))
 DELAY_MAX = float(os.environ.get("DELAY_MAX", "0.8"))
-COOLDOWN  = float(os.environ.get("COOLDOWN",  "2.0"))
+COOLDOWN  = float(os.environ.get("COOLDOWN",  "0"))
 
 PREFIX = "pk!"
 
@@ -622,6 +623,54 @@ def update_cooldown(channel_id: int) -> None:
     channel_last_action[channel_id] = time.time()
 
 
+
+async def _auto_backup(client: discord.Client) -> None:
+    """Backup bot data to a Discord channel every 5 minutes."""
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(300)
+        if not BACKUP_CHANNEL_ID:
+            continue
+        try:
+            ch = client.get_channel(BACKUP_CHANNEL_ID)
+            if not ch:
+                continue
+            payload = "BOT_DATA_BACKUP\n```json\n" + json.dumps(_data) + "\n```"
+            async for m in ch.history(limit=30):
+                if m.author.id == (client.user.id if client.user else 0) and m.content.startswith("BOT_DATA_BACKUP"):
+                    await m.edit(content=payload)
+                    break
+            else:
+                await ch.send(payload)
+        except Exception as exc:
+            log.error("Auto-backup failed: %s", exc)
+
+
+async def _restore_from_channel(client: discord.Client) -> bool:
+    """Restore data from Discord backup channel on startup."""
+    if not BACKUP_CHANNEL_ID:
+        return False
+    try:
+        ch = client.get_channel(BACKUP_CHANNEL_ID)
+        if not ch:
+            return False
+        async for m in ch.history(limit=30):
+            if m.author.id == (client.user.id if client.user else 0) and m.content.startswith("BOT_DATA_BACKUP"):
+                raw = m.content
+                start = raw.index("```json\n") + 8
+                end = raw.rindex("\n```")
+                global _data
+                _data = json.loads(raw[start:end])
+                for k, v in _DEFAULT_DATA.items():
+                    _data.setdefault(k, type(v)())
+                _save()
+                log.info("Restored data from Discord backup channel")
+                return True
+    except Exception as exc:
+        log.error("Restore failed: %s", exc)
+    return False
+
+
 # ── BOT ─────────────────────────────────────────────────────────────────
 
 async def run_bot() -> None:
@@ -636,6 +685,10 @@ async def run_bot() -> None:
                  client.user, client.user.id if client.user else "?",
                  "READY" if ort_session else "DISABLED",
                  WATCH_CHANNEL_IDS or "all channels")
+        if not DATA_PATH.exists():
+            log.info("No local data — attempting restore from backup channel...")
+            await _restore_from_channel(client)
+        asyncio.ensure_future(_auto_backup(client))
 
     @client.event
     async def on_message(msg: discord.Message) -> None:
@@ -713,7 +766,8 @@ async def cmd_help(msg: discord.Message) -> None:
         "`pk!cl list` — view your list"
     ), inline=False)
     embed.add_field(name="\u2728 Shiny Hunting", value=(
-        "`pk!sh <pokemon>` — set your hunt target (1 at a time)\n"
+        "`pk!sh <pokemon>` — set your hunt target\n"
+        "`pk!sh all <species>` — hunt all forms (e.g. `all wooper`)\n"
         "`pk!sh clear` — clear your hunt"
     ), inline=False)
     embed.add_field(name="\u2699\ufe0f Admin — Server", value=(
@@ -951,7 +1005,7 @@ ADMIN_HELP = """
 `pk!admin addcol @user/id <pokemon, ...>` — add to user's collection
 `pk!admin removecol @user/id <pokemon>` — remove from user's collection
 `pk!admin clearcol @user/id` — clear user's collection
-`pk!admin setsh @user/id <pokemon>` — set user's shiny hunt
+`pk!admin setsh @user/id <pokemon>` — set user's shiny hunt (supports `all <species>`)
 `pk!admin clearsh @user/id` — clear user's shiny hunt
 
 **Server management**
@@ -1114,14 +1168,26 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
     # ── setsh ─────────────────────────────────────────────────────────
     elif sub == "setsh":
         if len(parts) < 3:
-            return await msg.channel.send("Usage: `pk!admin setsh @user/id <pokemon>`")
+            return await msg.channel.send("Usage: `pk!admin setsh @user/id <pokemon>` or `pk!admin setsh @user/id all <species>`")
         uid = parse_user_id(parts[1])
         if not uid:
             return await msg.channel.send("❌ Couldn't parse user ID.")
-        pokemon = parts[2].strip().lower()
-        _data["user_shiny_hunts"][str(uid)] = pokemon
-        _save()
-        await msg.channel.send(f"✅ Set `{uid}`'s shiny hunt to **{label_to_display(pokemon)}**.")
+        query = " ".join(parts[2:]).strip().lower()
+        if query.startswith("all "):
+            species = query[4:].strip()
+            forms = find_all_forms(species)
+            if not forms:
+                return await msg.channel.send(f"❌ No forms found for **{species.title()}**. Check the spelling.")
+            _data["user_shiny_hunts"][str(uid)] = forms
+            _save()
+            await msg.channel.send(f"✅ Set `{uid}`'s shiny hunt to all forms of **{species.title()}**: {', '.join(label_to_display(f) for f in forms)}.")
+        else:
+            matched = next((lbl for lbl in class_names if label_matches_query(lbl, query)), None)
+            if not matched:
+                return await msg.channel.send(f"❌ No Pokémon found for **{query.title()}**. Check the spelling.")
+            _data["user_shiny_hunts"][str(uid)] = matched
+            _save()
+            await msg.channel.send(f"✅ Set `{uid}`'s shiny hunt to **{label_to_display(matched)}**.")
 
     # ── clearsh ───────────────────────────────────────────────────────
     elif sub == "clearsh":
@@ -1206,6 +1272,27 @@ async def cmd_admin(msg: discord.Message, args: str, client: discord.Client) -> 
         embed = discord.Embed(title="Test Spawn Preview", description="\n".join(lines), color=0xFEE75C)
         embed.set_footer(text=f"Label: {pokemon} | Rare: {is_rare(pokemon, gid)} | Regional: {is_regional(pokemon, gid)}")
         await msg.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    # ── generate ──────────────────────────────────────────────────────
+    elif sub == "generate":
+        query = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+        if not query:
+            return await msg.channel.send("Usage: `pk!admin generate <pokemon>`")
+        matched = next((lbl for lbl in class_names if label_matches_query(lbl, query)), None)
+        if not matched:
+            return await msg.channel.send(f"❌ No Pokémon found for **{query.title()}**.")
+        display = label_to_display(matched)
+        dex_num = next((k for k, v in POKEDEX.items() if v.lower() == display.lower()), None)
+        if not dex_num:
+            base = re.split(r'[-_]', matched)[0]
+            dex_num = next((k for k, v in POKEDEX.items() if v.lower() == base.lower()), None)
+        if not dex_num:
+            return await msg.channel.send(f"❌ Couldn't find dex number for **{display}**.")
+        url = f"https://cdn.poketwo.net/images/{dex_num}.png"
+        embed = discord.Embed(title=display, description=f"**Spawn URL:**\n`{url}`", color=0x5865F2)
+        embed.set_image(url=url)
+        embed.set_footer(text=f"Label: {matched} | Dex #{dex_num}")
+        await msg.channel.send(embed=embed)
 
     # ── backup ────────────────────────────────────────────────────────
     elif sub == "backup":
