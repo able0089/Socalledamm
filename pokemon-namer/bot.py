@@ -41,9 +41,17 @@ _raw = os.environ.get("WATCH_CHANNEL_IDS", "")
 WATCH_CHANNEL_IDS = {int(x.strip()) for x in _raw.split(",") if x.strip()}
 
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0") or "0")
-DELAY_MIN = float(os.environ.get("DELAY_MIN", "0.3"))
-DELAY_MAX = float(os.environ.get("DELAY_MAX", "0.8"))
-COOLDOWN  = float(os.environ.get("COOLDOWN",  "0"))
+# Response delay: randomised to look human and avoid bursts
+DELAY_MIN = float(os.environ.get("DELAY_MIN", "1.5"))
+DELAY_MAX = float(os.environ.get("DELAY_MAX", "3.0"))
+# Per-channel cooldown (seconds) — prevents two responses in the same channel
+# within this window even if spawns arrive back-to-back.
+COOLDOWN  = float(os.environ.get("COOLDOWN", "2.0"))
+# Global send-rate cap: max messages across ALL channels per rolling window
+GLOBAL_RATE_LIMIT     = int(os.environ.get("GLOBAL_RATE_LIMIT", "4"))    # messages
+GLOBAL_RATE_WINDOW    = float(os.environ.get("GLOBAL_RATE_WINDOW", "6")) # seconds
+# How long to pause when Discord tells us to slow down (floor; actual uses retry_after)
+RATE_LIMIT_BACKOFF    = float(os.environ.get("RATE_LIMIT_BACKOFF", "2.0"))
 
 PREFIX = "pk!"
 
@@ -608,11 +616,50 @@ def pokemon_list_from_args(text: str) -> list[str]:
     return [p.strip().lower() for p in re.split(r"[,]+", text) if p.strip()]
 
 
-# ── CHANNEL STATE ───────────────────────────────────────────────────────
+# ── CHANNEL STATE & GLOBAL RATE LIMITER ────────────────────────────────
 
 channel_last_action: dict[int, float] = {}
-semaphore = asyncio.Semaphore(5)
+
+# Semaphore: at most 2 spawns processed concurrently.
+# With DELAY_MIN=1.5 s this caps burst throughput well below Discord's
+# per-bot global limit of ~50 msg/s while leaving headroom for commands.
+semaphore = asyncio.Semaphore(2)
+
 http_session: aiohttp.ClientSession | None = None
+
+
+class GlobalRateLimiter:
+    """Token-bucket style limiter: allows at most `rate` sends per `per` seconds
+    across the entire bot, independent of channel.  Any coroutine that wants to
+    send a message must acquire a slot first; if the bucket is full it waits.
+    """
+
+    def __init__(self, rate: int, per: float) -> None:
+        self._rate = rate          # max tokens (messages) in the window
+        self._per  = per           # window length in seconds
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            # Drop timestamps outside the rolling window
+            while self._timestamps and now - self._timestamps[0] >= self._per:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._rate:
+                # Wait until the oldest slot expires
+                wait_for = self._per - (now - self._timestamps[0])
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
+                # Re-prune after sleeping
+                now = time.monotonic()
+                while self._timestamps and now - self._timestamps[0] >= self._per:
+                    self._timestamps.popleft()
+            self._timestamps.append(time.monotonic())
+
+
+# Single global instance — shared by handle_spawn and everything that sends
+_global_rl: GlobalRateLimiter | None = None
 
 
 def on_cooldown(channel_id: int) -> bool:
@@ -621,6 +668,58 @@ def on_cooldown(channel_id: int) -> bool:
 
 def update_cooldown(channel_id: int) -> None:
     channel_last_action[channel_id] = time.time()
+
+
+async def safe_send(
+    channel: discord.TextChannel,
+    content: str,
+    *,
+    reference: discord.Message | None = None,
+    allowed_mentions: discord.AllowedMentions | None = None,
+    max_retries: int = 3,
+) -> None:
+    """Send a message with automatic 429 retry logic and global rate-limit gating.
+
+    Waits for the global token-bucket slot first, then attempts the send.
+    On HTTP 429 it sleeps for ``retry_after`` (or RATE_LIMIT_BACKOFF as a
+    floor) before re-acquiring a slot and retrying.  Other HTTP errors are
+    logged and not retried.
+    """
+    if _global_rl is not None:
+        await _global_rl.acquire()
+
+    kwargs: dict = {"content": content}
+    if reference is not None:
+        kwargs["reference"] = reference
+        kwargs["mention_author"] = False
+    if allowed_mentions is not None:
+        kwargs["allowed_mentions"] = allowed_mentions
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await channel.send(**kwargs)
+            return
+        except discord.Forbidden:
+            log.warning("No send permission in #%s — dropping message", channel.id)
+            return
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                # Discord's retry_after can be on the exception or in the response json
+                retry_after: float = RATE_LIMIT_BACKOFF
+                if hasattr(exc, "retry_after") and exc.retry_after:
+                    retry_after = max(float(exc.retry_after), RATE_LIMIT_BACKOFF)
+                log.warning(
+                    "Rate limited on #%s (attempt %d/%d) — sleeping %.2fs",
+                    channel.id, attempt, max_retries, retry_after,
+                )
+                await asyncio.sleep(retry_after)
+                # Re-acquire a global slot after the sleep
+                if _global_rl is not None:
+                    await _global_rl.acquire()
+            else:
+                log.error("Send failed in #%s: %s", channel.id, exc)
+                return
+    log.error("Gave up sending to #%s after %d attempts", channel.id, max_retries)
 
 
 
@@ -1324,6 +1423,8 @@ async def handle_spawn(msg: discord.Message) -> None:
     if not any(ch_cfg.get(k, True) for k in CHANNEL_TOGGLES):
         return
 
+    # semaphore=2 means at most 2 spawns are in-flight simultaneously,
+    # which prevents aiohttp and Discord request bursts.
     async with semaphore:
         if on_cooldown(msg.channel.id):
             return
@@ -1377,20 +1478,18 @@ async def handle_spawn(msg: discord.Message) -> None:
         if not lines:
             return
 
+        # Human-like delay before responding, then set cooldown so back-to-back
+        # spawns in the same channel don't both fire within the cooldown window.
         delay = random.uniform(DELAY_MIN, DELAY_MAX)
         await asyncio.sleep(delay)
         update_cooldown(msg.channel.id)
 
-        try:
-            await msg.channel.send(
-                "\n".join(lines),
-                reference=msg, mention_author=False,
-                allowed_mentions=discord.AllowedMentions(roles=True, users=True)
-            )
-        except discord.Forbidden:
-            log.warning("No send permission in #%s", msg.channel.id)
-        except discord.HTTPException as exc:
-            log.error("Send failed: %s", exc)
+        await safe_send(
+            msg.channel,
+            "\n".join(lines),
+            reference=msg,
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+        )
 
 
 # ── WEB SERVER ────────────────────────────────────────────────────────────
@@ -1413,11 +1512,14 @@ async def start_web() -> None:
 # ── MAIN ──────────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    global http_session
+    global http_session, _global_rl
     _load()
     setup_classifier()
     load_pokedex()
-    connector  = aiohttp.TCPConnector(limit=20)
+    _global_rl = GlobalRateLimiter(rate=GLOBAL_RATE_LIMIT, per=GLOBAL_RATE_WINDOW)
+    # limit=5: keeps outbound HTTP connections modest; the bot only needs
+    # a handful of concurrent image downloads at most.
+    connector  = aiohttp.TCPConnector(limit=5)
     http_session = aiohttp.ClientSession(connector=connector)
     await start_web()
     await asyncio.sleep(2)
